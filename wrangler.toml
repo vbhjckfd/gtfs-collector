@@ -1,0 +1,10 @@
+name = "gtfs-collector"
+main = "src/worker.js"
+compatibility_date = "2024-09-01"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "gtfs-lviv"
+
+[triggers]
+crons = ["* 2-21 * * *"]  # every minute, ~4am–midnight Kyiv (UTC+2); runtime check handles DST edge cases
