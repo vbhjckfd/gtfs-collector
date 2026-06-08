@@ -12,6 +12,34 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    if (url.pathname === "/health") {
+      const now = new Date();
+      const today = now.toISOString().slice(0, 10);
+      const tenMinAgo = new Date(now - 10 * 60 * 1000).toISOString();
+
+      const list = await env.BUCKET.list({
+        prefix: `raw/${today}/`,
+        startAfter: `raw/${today}/${tenMinAgo}`,
+        limit: 20,
+      });
+
+      // objects are in lexicographic key order; ISO timestamps sort correctly
+      const latest = list.objects.at(-1);
+      const ageSecs = latest ? Math.round((now - latest.uploaded) / 1000) : null;
+
+      const hour = parseInt(
+        now.toLocaleString("en-US", { timeZone: "Europe/Kyiv", hour: "numeric", hour12: false }),
+        10,
+      );
+      const offHours = hour >= 0 && hour < 4;
+      const healthy = offHours || (ageSecs !== null && ageSecs <= 180);
+
+      return Response.json(
+        { status: healthy ? "ok" : "stale", last_upload: latest?.uploaded ?? null, age_seconds: ageSecs, off_hours: offHours },
+        { status: healthy ? 200 : 503 },
+      );
+    }
+
     if (url.pathname === "/list") {
       const list = await env.BUCKET.list({ limit: 20 });
       return Response.json({
