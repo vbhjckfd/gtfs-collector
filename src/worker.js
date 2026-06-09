@@ -10,6 +10,16 @@ export default {
 
   // Manual trigger (for testing): curl https://your-worker.workers.dev/
   async fetch(request, env) {
+    try {
+      return await handleFetch(request, env);
+    } catch (err) {
+      await captureToSentry(env, err, { tags: { handler: "fetch" } });
+      return new Response("error", { status: 500 });
+    }
+  },
+};
+
+async function handleFetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
@@ -54,8 +64,7 @@ export default {
 
     await collect(env);
     return new Response("ok");
-  },
-};
+}
 
 function isValidGtfsFeed(buf) {
   // GTFS-RT FeedMessage always starts with field 1 (header), wire type 2 → 0x0A
@@ -80,23 +89,101 @@ async function fetchFeed() {
 }
 
 async function collect(env) {
-  const hour = parseInt(
-    new Date().toLocaleString("en-US", {
-      timeZone: "Europe/Kyiv",
-      hour: "numeric",
-      hour12: false,
-    }),
-    10,
-  );
-  if (hour >= 0 && hour < 4) return;
+  try {
+    const hour = parseInt(
+      new Date().toLocaleString("en-US", {
+        timeZone: "Europe/Kyiv",
+        hour: "numeric",
+        hour12: false,
+      }),
+      10,
+    );
+    if (hour >= 0 && hour < 4) return;
 
-  const buf = await fetchFeed();
-  if (!buf) return;
+    const buf = await fetchFeed();
+    if (!buf) {
+      await captureToSentry(env, "GTFS feed unavailable after all retries", {
+        level: "warning",
+        tags: { stage: "fetch_feed" },
+      });
+      return;
+    }
 
-  const now = new Date();
-  const key = `raw/${now.toISOString().slice(0, 10)}/${now.toISOString()}.pb`;
+    const now = new Date();
+    const key = `raw/${now.toISOString().slice(0, 10)}/${now.toISOString()}.pb`;
 
-  await env.BUCKET.put(key, buf, {
-    httpMetadata: { contentType: "application/x-protobuf" },
-  });
+    await env.BUCKET.put(key, buf, {
+      httpMetadata: { contentType: "application/x-protobuf" },
+    });
+  } catch (err) {
+    await captureToSentry(env, err, { tags: { stage: "collect" } });
+  }
+}
+
+// Minimal dependency-free Sentry client. Builds a single-event envelope and
+// POSTs it to the project's ingest endpoint derived from the DSN. Every event
+// carries `service: "gtfs-collector"` so it can be filtered out of the shared
+// Sentry project. Reporting failures are swallowed — they must never break
+// collection.
+async function captureToSentry(env, errorOrMessage, context = {}) {
+  if (!env.SENTRY_DSN) return;
+  try {
+    const dsn = new URL(env.SENTRY_DSN);
+    const projectId = dsn.pathname.slice(1);
+    const endpoint = `${dsn.protocol}//${dsn.host}/api/${projectId}/envelope/`;
+    const eventId = crypto.randomUUID().replace(/-/g, "");
+
+    const event = {
+      event_id: eventId,
+      timestamp: Date.now() / 1000,
+      platform: "javascript",
+      level: context.level || "error",
+      server_name: "gtfs-collector",
+      environment: env.SENTRY_ENVIRONMENT || "production",
+      tags: { service: "gtfs-collector", ...context.tags },
+    };
+
+    if (errorOrMessage instanceof Error) {
+      event.exception = {
+        values: [
+          {
+            type: errorOrMessage.name,
+            value: errorOrMessage.message,
+            stacktrace: { frames: parseStackFrames(errorOrMessage.stack) },
+          },
+        ],
+      };
+    } else {
+      event.message = String(errorOrMessage);
+    }
+
+    const envelope =
+      JSON.stringify({ event_id: eventId, sent_at: new Date().toISOString(), dsn: env.SENTRY_DSN }) +
+      "\n" +
+      JSON.stringify({ type: "event" }) +
+      "\n" +
+      JSON.stringify(event);
+
+    await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-sentry-envelope" },
+      body: envelope,
+    });
+  } catch {
+    // never let error reporting break the worker
+  }
+}
+
+// Parse a V8 stack trace into Sentry frames (oldest call first).
+function parseStackFrames(stack) {
+  if (!stack) return [];
+  return stack
+    .split("\n")
+    .slice(1)
+    .map((line) => {
+      const m = line.match(/at (?:(.+?) \()?(.+?):(\d+):(\d+)\)?$/);
+      return m ? { function: m[1] || "?", filename: m[2], lineno: +m[3], colno: +m[4] } : null;
+    })
+    .filter(Boolean)
+    .reverse();
 }
