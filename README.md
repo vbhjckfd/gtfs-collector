@@ -37,7 +37,7 @@ All config lives in [wrangler.toml](wrangler.toml):
 | `name` | `gtfs-collector` | Worker name |
 | `main` | `src/worker.js` | Entry point |
 | `r2_buckets[].bucket_name` | `gtfs-lviv` | R2 bucket for raw snapshots |
-| `triggers.crons` | `* 2-21 * * *` | UTC schedule (≈ 04:00–23:00 Kyiv) |
+| `triggers.crons` | `* 1-21 * * *` | UTC schedule; runtime guard gates the 04:00 Kyiv start across DST |
 
 ## HTTP endpoints
 

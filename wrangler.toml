@@ -7,4 +7,4 @@ binding = "BUCKET"
 bucket_name = "gtfs-lviv"
 
 [triggers]
-crons = ["* 2-21 * * *"]  # every minute, ~4am–midnight Kyiv (UTC+2); runtime check handles DST edge cases
+crons = ["* 1-21 * * *"]  # every minute UTC 01–21; runtime guard (Kyiv <4 skip) gates the 04:00 start across DST
