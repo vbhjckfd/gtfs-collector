@@ -1,4 +1,7 @@
-.PHONY: deploy
+.PHONY: install deploy
+
+install:
+	. "$$NVM_DIR/nvm.sh" && nvm use && npm install
 
 deploy:
-	npx wrangler deploy
+	. "$$NVM_DIR/nvm.sh" && nvm use && npx wrangler deploy
