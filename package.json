@@ -1,6 +1,6 @@
 {
   "name": "gtfs-collector",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -10,6 +10,6 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "wrangler": "^4.100.0"
+    "wrangler": "^4.106.0"
   }
 }
