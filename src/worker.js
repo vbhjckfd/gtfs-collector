@@ -3,9 +3,17 @@ const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 0.2;
 
 export default {
-  // Cron trigger
+  // Cron trigger fires every minute; collect twice per invocation for an
+  // effective 30s sampling interval (vehicles report every ~15-18s, so 60s
+  // polling drops most position reports).
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(collect(env));
+    ctx.waitUntil(
+      (async () => {
+        await collect(env);
+        await new Promise((r) => setTimeout(r, 30_000));
+        await collect(env);
+      })(),
+    );
   },
 
   // Manual trigger (for testing): curl https://your-worker.workers.dev/
