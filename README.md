@@ -4,7 +4,7 @@ A Cloudflare Worker that periodically fetches GTFS-RT (realtime) vehicle positio
 
 ## What it does
 
-- Runs every minute from ~04:00 to midnight Kyiv time (UTC+2), triggered by a Cloudflare Cron
+- Cron fires every minute from ~04:00 to midnight Kyiv time (UTC+2); each fire polls the feed every 10s (six 10s steps) since Cloudflare Cron Triggers can't fire faster than once/minute
 - Fetches a protobuf-encoded GTFS-RT feed from `track.ua-gis.com`
 - Stores each snapshot to R2 at `raw/YYYY-MM-DD/YYYY-MM-DDTHH:mm:ss.pb`
 - Silently skips the 00:00–04:00 window (low transit activity)
@@ -37,7 +37,7 @@ All config lives in [wrangler.toml](wrangler.toml):
 | `name` | `gtfs-collector` | Worker name |
 | `main` | `src/worker.js` | Entry point |
 | `r2_buckets[].bucket_name` | `gtfs-lviv` | R2 bucket for raw snapshots |
-| `triggers.crons` | `* 1-21 * * *` | UTC schedule; runtime guard gates the 04:00 Kyiv start across DST |
+| `triggers.crons` | `* 1-21 * * *` | UTC schedule; runtime guard gates the 04:00 Kyiv start across DST; worker polls every 10s (six 10s steps per fire) |
 
 ## HTTP endpoints
 

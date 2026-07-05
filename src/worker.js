@@ -1,17 +1,26 @@
 const FEED_URL = "https://track.ua-gis.com/gtfs/lviv/vehicle_position";
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 0.2;
+const POLL_INTERVAL_MS = 10_000;
+const POLLS_PER_CRON = 6;
 
 export default {
-  // Cron trigger fires every minute; collect twice per invocation for an
-  // effective 30s sampling interval (vehicles report every ~15-18s, so 60s
-  // polling drops most position reports).
+  // Cron trigger fires every minute; Cloudflare Cron Triggers can't fire
+  // faster than 1/min, so we poll every 10s (in six 10s steps per 1-minute
+  // cron fire) internally. Measured feed dynamics: median gap between a
+  // vehicle's distinct GTFS-RT timestamps is ~10s (p90=30s), so 10s polling
+  // captures most position updates that 30s/60s polling was discarding.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
-        await collect(env);
-        await new Promise((r) => setTimeout(r, 30_000));
-        await collect(env);
+        for (let i = 0; i < POLLS_PER_CRON; i++) {
+          const start = Date.now();
+          await collect(env);
+          if (i < POLLS_PER_CRON - 1) {
+            const elapsed = Date.now() - start;
+            await new Promise((r) => setTimeout(r, Math.max(0, POLL_INTERVAL_MS - elapsed)));
+          }
+        }
       })(),
     );
   },

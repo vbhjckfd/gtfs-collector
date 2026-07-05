@@ -7,4 +7,4 @@ binding = "BUCKET"
 bucket_name = "gtfs-lviv"
 
 [triggers]
-crons = ["* 1-21 * * *"]  # every minute UTC 01–21; runtime guard (Kyiv <4 skip) gates the 04:00 start across DST
+crons = ["* 1-21 * * *"]  # fires every minute UTC 01–21; worker polls every 10s (six 10s steps per fire); runtime guard (Kyiv <4 skip) gates the 04:00 start across DST
