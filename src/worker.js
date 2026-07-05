@@ -47,7 +47,10 @@ async function handleFetch(request, env) {
       const list = await env.BUCKET.list({
         prefix: `raw/${today}/`,
         startAfter: `raw/${today}/${tenMinAgo}`,
-        limit: 20,
+        // At 10s cadence, up to 60 objects can land in this 10-min window;
+        // limit must clear that so .at(-1) below is the true latest, not
+        // just the last of a truncated page.
+        limit: 100,
       });
 
       // objects are in lexicographic key order; ISO timestamps sort correctly
