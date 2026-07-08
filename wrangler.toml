@@ -8,3 +8,10 @@ bucket_name = "gtfs-lviv"
 
 [triggers]
 crons = ["* 1-21 * * *"]  # fires every minute UTC 01–21; worker polls every 10s (six 10s steps per fire); runtime guard (Kyiv <4 skip) gates the 04:00 start across DST
+
+# Optional: per-poll metrics (payload size, entity count) via Workers
+# Analytics Engine. Requires a Workers Paid plan. Uncomment to enable —
+# the worker checks for this binding and no-ops if it's absent.
+# [[analytics_engine_datasets]]
+# binding = "ANALYTICS"
+# dataset = "gtfs_collector"

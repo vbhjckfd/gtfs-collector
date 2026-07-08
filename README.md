@@ -7,6 +7,9 @@ A Cloudflare Worker that periodically fetches GTFS-RT (realtime) vehicle positio
 - Cron fires every minute from ~04:00 to midnight Kyiv time (UTC+2); each fire polls the feed every 10s (six 10s steps) since Cloudflare Cron Triggers can't fire faster than once/minute
 - Fetches a protobuf-encoded GTFS-RT feed from `track.ua-gis.com`
 - Stores each snapshot to R2 at `raw/YYYY-MM-DD/YYYY-MM-DDTHH:mm:ss.pb`
+- Skips writing a snapshot if the feed's header timestamp is unchanged since the previous poll (avoids storing duplicate data when the upstream feed hasn't updated yet)
+- Attaches `entityCount`, `feedTimestamp`, and `bytes` as R2 custom metadata on each object
+- Warns via Sentry (at most once per cron fire) if the feed is unreachable or its header timestamp is more than 5 minutes stale
 - Silently skips the 00:00–04:00 window (low transit activity)
 
 ## Setup
@@ -38,6 +41,7 @@ All config lives in [wrangler.toml](wrangler.toml):
 | `main` | `src/worker.js` | Entry point |
 | `r2_buckets[].bucket_name` | `gtfs-lviv` | R2 bucket for raw snapshots |
 | `triggers.crons` | `* 1-21 * * *` | UTC schedule; runtime guard gates the 04:00 Kyiv start across DST; worker polls every 10s (six 10s steps per fire) |
+| `analytics_engine_datasets[].binding` | `ANALYTICS` (commented out) | Optional per-poll metrics (payload size, entity count) via Workers Analytics Engine. Requires a Workers Paid plan; uncomment to enable, the worker no-ops if unbound |
 
 ## HTTP endpoints
 
@@ -46,7 +50,10 @@ The worker also responds to HTTP for manual triggering and inspection:
 | Path | Description |
 |------|-------------|
 | `GET /` | Trigger a collection immediately and return `ok` |
-| `GET /list` | List the 20 most recent objects in R2 |
+| `GET /health` | Health check based on freshness of the latest snapshot; `200` if healthy, `503` if stale |
+| `GET /latest` | Metadata (key, size, age, custom metadata) for the most recent snapshot; add `?raw` to stream the `.pb` bytes directly |
+| `GET /stats?date=YYYY-MM-DD` | Snapshot count, total/average bytes, and largest gap between snapshots for a day (defaults to today) |
+| `GET /list` | List objects in R2. Optional `?date=YYYY-MM-DD` (prefix filter), `?limit=N` (default 20, max 1000), `?cursor=...` for pagination; response includes a `cursor` for the next page when truncated |
 
 ## Data layout
 
