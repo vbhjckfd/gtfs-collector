@@ -4,6 +4,7 @@ const BASE_DELAY_MS = 200;
 const POLL_INTERVAL_MS = 10_000;
 const POLLS_PER_CRON = 6;
 const STALE_FEED_THRESHOLD_SECS = 300;
+const PUT_MAX_RETRIES = 3;
 
 export default {
   // Cron trigger fires every minute; Cloudflare Cron Triggers can't fire
@@ -192,21 +193,45 @@ function isValidGtfsFeed(buf) {
   return buf.byteLength > 0 && new Uint8Array(buf)[0] === 0x0a;
 }
 
+// Returns { buf, failure }: `buf` is null when every attempt failed, and
+// `failure` then classifies the last attempt (`http_404` vs `http_503` vs
+// `network_error` vs `invalid_body`) so a permanent feed URL change is
+// distinguishable from a transient upstream blip in Sentry.
 async function fetchFeed() {
+  let failure = "unknown";
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       await new Promise((r) => setTimeout(r, BASE_DELAY_MS * 2 ** attempt));
     }
     try {
       const res = await fetch(FEED_URL);
-      if (!res.ok) continue;
+      if (!res.ok) {
+        failure = `http_${res.status}`;
+        continue;
+      }
       const buf = await res.arrayBuffer();
-      if (isValidGtfsFeed(buf)) return buf;
+      if (isValidGtfsFeed(buf)) return { buf, failure: null };
+      failure = "invalid_body";
     } catch {
       // network error, timeout, or body read failure
+      failure = "network_error";
     }
   }
-  return null;
+  return { buf: null, failure };
+}
+
+// R2 occasionally returns a transient internal error ("We encountered an
+// internal error. Please try again. (10001)"); a couple of retries turn a
+// lost snapshot into a slightly delayed one.
+async function putWithRetry(bucket, key, buf, options) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await bucket.put(key, buf, options);
+    } catch (err) {
+      if (attempt === PUT_MAX_RETRIES - 1) throw err;
+      await new Promise((r) => setTimeout(r, BASE_DELAY_MS * 2 ** attempt));
+    }
+  }
 }
 
 async function collect(env, state) {
@@ -214,13 +239,13 @@ async function collect(env, state) {
     const hour = kyivHour(new Date());
     if (hour >= 0 && hour < 4) return;
 
-    const buf = await fetchFeed();
+    const { buf, failure } = await fetchFeed();
     if (!buf) {
       if (!state.warnedUnavailable) {
         state.warnedUnavailable = true;
         await captureToSentry(env, "GTFS feed unavailable after all retries", {
           level: "warning",
-          tags: { stage: "fetch_feed" },
+          tags: { stage: "fetch_feed", feed_failure: failure },
         });
       }
       return;
@@ -264,7 +289,7 @@ async function collect(env, state) {
       });
     }
 
-    await env.BUCKET.put(key, buf, {
+    await putWithRetry(env.BUCKET, key, buf, {
       httpMetadata: { contentType: "application/x-protobuf" },
       customMetadata: {
         entityCount: String(feedInfo.entityCount),
@@ -447,4 +472,6 @@ export const __testing = {
   computeStats,
   findLatestObject,
   collect,
+  fetchFeed,
+  putWithRetry,
 };

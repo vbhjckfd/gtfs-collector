@@ -203,3 +203,92 @@ describe("collect() dedup and staleness", () => {
     expect(objects).toHaveLength(2);
   });
 });
+
+describe("fetchFeed() failure classification", () => {
+  async function fetchFeedWithTimers() {
+    // fetchFeed backs off between attempts; drive those timers instead of
+    // waiting out the real ~6s of delays.
+    const promise = __testing.fetchFeed();
+    await vi.advanceTimersByTimeAsync(30_000);
+    return promise;
+  }
+
+  it("reports the HTTP status of the last failed attempt", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("gone", { status: 404 })),
+    );
+
+    const result = await fetchFeedWithTimers();
+    expect(result.buf).toBeNull();
+    expect(result.failure).toBe("http_404");
+  });
+
+  it("distinguishes a network error from an HTTP error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("connection reset");
+      }),
+    );
+
+    expect((await fetchFeedWithTimers()).failure).toBe("network_error");
+  });
+
+  it("flags a 200 response that is not a GTFS-RT FeedMessage", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array([0xff, 0xff]), { status: 200 })),
+    );
+
+    expect((await fetchFeedWithTimers()).failure).toBe("invalid_body");
+  });
+
+  it("returns the buffer with no failure on success", async () => {
+    mockFeedOnce(buildFeedMessage({ timestamp: 1_700_000_040, entityCount: 1 }));
+
+    const result = await fetchFeedWithTimers();
+    expect(result.failure).toBeNull();
+    expect(result.buf.byteLength).toBeGreaterThan(0);
+  });
+});
+
+describe("putWithRetry()", () => {
+  async function putWithTimers(bucket) {
+    // Settle-capture before advancing timers: the rejection lands while the
+    // fake clock is being driven, and would otherwise surface as an
+    // unhandled rejection before the assertion attaches.
+    const settled = __testing
+      .putWithRetry(bucket, "raw/x.pb", new Uint8Array([1]), {})
+      .then((value) => ({ value }), (error) => ({ error }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    const outcome = await settled;
+    if (outcome.error) throw outcome.error;
+    return outcome.value;
+  }
+
+  it("retries a transient R2 internal error and succeeds", async () => {
+    let calls = 0;
+    const bucket = {
+      put: vi.fn(async () => {
+        calls++;
+        if (calls < 3) throw new Error("put: We encountered an internal error. Please try again. (10001)");
+        return { key: "raw/x.pb" };
+      }),
+    };
+
+    await expect(putWithTimers(bucket)).resolves.toEqual({ key: "raw/x.pb" });
+    expect(bucket.put).toHaveBeenCalledTimes(3);
+  });
+
+  it("rethrows after the retry budget is exhausted", async () => {
+    const bucket = {
+      put: vi.fn(async () => {
+        throw new Error("put: We encountered an internal error. Please try again. (10001)");
+      }),
+    };
+
+    await expect(putWithTimers(bucket)).rejects.toThrow("10001");
+    expect(bucket.put).toHaveBeenCalledTimes(3);
+  });
+});
