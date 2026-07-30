@@ -8,6 +8,9 @@
     "deploy": "wrangler deploy",
     "test": "vitest run"
   },
+  "engines": {
+    "node": ">=26"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
