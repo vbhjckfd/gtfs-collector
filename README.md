@@ -11,6 +11,7 @@ A Cloudflare Worker that periodically fetches GTFS-RT (realtime) vehicle positio
 - Attaches `entityCount`, `feedTimestamp`, and `bytes` as R2 custom metadata on each object
 - Warns via Sentry (at most once per cron fire) if the feed is unreachable or its header timestamp is more than 5 minutes stale
 - Silently skips the 00:00–04:00 window (low transit activity)
+- A second, once-daily cron archives the **GTFS static** feed (schedule data — routes, trips, stop_times, calendar) to `static/YYYY-MM-DD/static.zip`, skipping the write when a HEAD request's ETag/Last-Modified shows it hasn't changed since the last archived copy. Static rarely changes, but downstream consumers that score/train against past days need the schedule that was actually in effect that day, not whatever is current.
 
 ## Setup
 
@@ -54,6 +55,8 @@ The worker also responds to HTTP for manual triggering and inspection:
 | `GET /latest` | Metadata (key, size, age, custom metadata) for the most recent snapshot; add `?raw` to stream the `.pb` bytes directly |
 | `GET /stats?date=YYYY-MM-DD` | Snapshot count, total/average bytes, and largest gap between snapshots for a day (defaults to today) |
 | `GET /list` | List objects in R2. Optional `?date=YYYY-MM-DD` (prefix filter), `?limit=N` (default 20, max 1000), `?cursor=...` for pagination; response includes a `cursor` for the next page when truncated |
+| `GET /static` | Trigger a static-feed archive check immediately and return `ok` |
+| `GET /static/latest` | Metadata (key, etag, lastModified, bytes, date) for the most recently archived static snapshot |
 
 ## Data layout
 
@@ -63,10 +66,17 @@ raw/
     2025-06-07T04:00:01.000Z.pb
     2025-06-07T04:01:00.123Z.pb
     ...
+static/
+  2026-07-02/
+    static.zip
+  2026-07-15/
+    static.zip
+  _latest.json   # {etag, lastModified, bytes, key, date} of the most recent archived copy
 ```
 
-Each `.pb` file is a raw GTFS-RT `FeedMessage` protobuf, content-type `application/x-protobuf`.
+Each `.pb` file is a raw GTFS-RT `FeedMessage` protobuf, content-type `application/x-protobuf`. Each `static.zip` is the upstream GTFS static feed unmodified; a new dated copy only appears when it actually changed.
 
 ## Feed source
 
-`https://track.ua-gis.com/gtfs/lviv/vehicle_position` — Lviv public transit GTFS-RT vehicle positions.
+- `https://track.ua-gis.com/gtfs/lviv/vehicle_position` — Lviv public transit GTFS-RT vehicle positions.
+- `https://track.ua-gis.com/gtfs/lviv/static.zip` — Lviv public transit GTFS static (schedule) feed.

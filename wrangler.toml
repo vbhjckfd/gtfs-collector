@@ -7,7 +7,10 @@ binding = "BUCKET"
 bucket_name = "gtfs-lviv"
 
 [triggers]
-crons = ["* 1-21 * * *"]  # fires every minute UTC 01–21; worker polls every 10s (six 10s steps per fire); runtime guard (Kyiv <4 skip) gates the 04:00 start across DST
+crons = [
+  "* 1-21 * * *",  # fires every minute UTC 01–21; worker polls every 10s (six 10s steps per fire); runtime guard (Kyiv <4 skip) gates the 04:00 start across DST
+  "0 2 * * *",     # once daily: archive the GTFS static feed if it changed (STATIC_CRON in src/worker.js)
+]
 
 # Optional: per-poll metrics (payload size, entity count) via Workers
 # Analytics Engine. Requires a Workers Paid plan. Uncomment to enable —

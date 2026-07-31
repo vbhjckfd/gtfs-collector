@@ -1,4 +1,7 @@
 const FEED_URL = "https://track.ua-gis.com/gtfs/lviv/vehicle_position";
+const STATIC_FEED_URL = "https://track.ua-gis.com/gtfs/lviv/static.zip";
+const STATIC_CRON = "0 2 * * *";
+const STATIC_LATEST_KEY = "static/_latest.json";
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 200;
 const POLL_INTERVAL_MS = 10_000;
@@ -12,7 +15,14 @@ export default {
   // cron fire) internally. Measured feed dynamics: median gap between a
   // vehicle's distinct GTFS-RT timestamps is ~10s (p90=30s), so 10s polling
   // captures most position updates that 30s/60s polling was discarding.
+  //
+  // A second, once-daily cron (STATIC_CRON) archives the GTFS static feed
+  // instead — see collectStatic().
   async scheduled(event, env, ctx) {
+    if (event.cron === STATIC_CRON) {
+      ctx.waitUntil(collectStatic(env));
+      return;
+    }
     ctx.waitUntil(
       (async () => {
         // Shared across the six polls in this cron fire: dedupes
@@ -87,6 +97,17 @@ async function handleFetch(request, env) {
 
   if (url.pathname === "/stats") {
     return Response.json(await computeStats(env, url.searchParams.get("date")));
+  }
+
+  if (url.pathname === "/static") {
+    await collectStatic(env);
+    return new Response("ok");
+  }
+
+  if (url.pathname === "/static/latest") {
+    const obj = await env.BUCKET.get(STATIC_LATEST_KEY);
+    if (!obj) return Response.json({ error: "no static snapshot recorded yet" }, { status: 404 });
+    return new Response(obj.body, { headers: { "Content-Type": "application/json" } });
   }
 
   if (url.pathname === "/list") {
@@ -302,6 +323,62 @@ async function collect(env, state) {
   }
 }
 
+// Archives the GTFS static feed (schedule data: routes, trips, stop_times,
+// calendar) once a day, dated by the day it was fetched. Unlike the
+// realtime feed, static rarely changes — a HEAD request's ETag/Last-Modified
+// is compared against the last archived copy (tracked in STATIC_LATEST_KEY)
+// so an unchanged feed costs one small request and no R2 write, not a
+// redundant multi-MB copy every day.
+//
+// Motivation: gtfs-eta (a downstream consumer) always scores/trains against
+// *current* static, even for past days — if the schedule changes, historical
+// scoring silently uses the wrong era. Dated snapshots here let it pin each
+// day to the static that was actually in effect.
+async function collectStatic(env) {
+  try {
+    const head = await fetch(STATIC_FEED_URL, { method: "HEAD" });
+    if (!head.ok) {
+      await captureToSentry(env, `GTFS static feed HEAD failed (http_${head.status})`, {
+        level: "warning",
+        tags: { stage: "fetch_static" },
+      });
+      return;
+    }
+    const etag = head.headers.get("etag") || "";
+    const lastModified = head.headers.get("last-modified") || "";
+
+    const prevObj = await env.BUCKET.get(STATIC_LATEST_KEY);
+    const prev = prevObj ? await prevObj.json() : null;
+    if (prev && etag && prev.etag === etag && prev.lastModified === lastModified) {
+      return; // unchanged since the last archived copy
+    }
+
+    const res = await fetch(STATIC_FEED_URL);
+    if (!res.ok) {
+      await captureToSentry(env, `GTFS static feed GET failed (http_${res.status})`, {
+        level: "warning",
+        tags: { stage: "fetch_static" },
+      });
+      return;
+    }
+    const buf = await res.arrayBuffer();
+
+    const day = new Date().toISOString().slice(0, 10);
+    const key = `static/${day}/static.zip`;
+    const meta = { etag, lastModified, bytes: String(buf.byteLength) };
+
+    await putWithRetry(env.BUCKET, key, buf, {
+      httpMetadata: { contentType: "application/zip" },
+      customMetadata: meta,
+    });
+    await env.BUCKET.put(STATIC_LATEST_KEY, JSON.stringify({ ...meta, key, date: day }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+  } catch (err) {
+    await captureToSentry(env, err, { tags: { stage: "collect_static" } });
+  }
+}
+
 // --- Minimal dependency-free protobuf field walker ---
 // We only need two things out of the GTFS-RT FeedMessage: the header
 // timestamp (for dedup + staleness detection) and a count of top-level
@@ -474,4 +551,5 @@ export const __testing = {
   collect,
   fetchFeed,
   putWithRetry,
+  collectStatic,
 };
