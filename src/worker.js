@@ -8,6 +8,7 @@ const POLL_INTERVAL_MS = 10_000;
 const POLLS_PER_CRON = 6;
 const STALE_FEED_THRESHOLD_SECS = 300;
 const PUT_MAX_RETRIES = 3;
+const LIST_MAX_RETRIES = 3;
 
 export default {
   // Cron trigger fires every minute; Cloudflare Cron Triggers can't fire
@@ -46,7 +47,15 @@ export default {
     try {
       return await handleFetch(request, env);
     } catch (err) {
-      await captureToSentry(env, err, { tags: { handler: "fetch" } });
+      // R2 binding errors carry no usable JS stack, so the path tag is the
+      // only way to tell which endpoint failed once it reaches Sentry.
+      let path = "unknown";
+      try {
+        path = new URL(request.url).pathname;
+      } catch {
+        // malformed URL; keep the placeholder
+      }
+      await captureToSentry(env, err, { tags: { handler: "fetch", path } });
       return new Response("error", { status: 500 });
     }
   },
@@ -117,7 +126,7 @@ async function handleFetch(request, env) {
     const cursor = url.searchParams.get("cursor") || undefined;
     const prefix = date ? `raw/${date}/` : undefined;
 
-    const list = await env.BUCKET.list({ prefix, limit, cursor });
+    const list = await listWithRetry(env.BUCKET, { prefix, limit, cursor });
     return Response.json({
       count: list.objects.length,
       keys: list.objects.map((o) => ({
@@ -148,7 +157,7 @@ function kyivHour(date) {
 async function findLatestObject(env, date, now) {
   for (const windowMin of [10, 60, 240]) {
     const startAfter = new Date(now - windowMin * 60 * 1000).toISOString();
-    const list = await env.BUCKET.list({
+    const list = await listWithRetry(env.BUCKET, {
       prefix: `raw/${date}/`,
       startAfter: `raw/${date}/${startAfter}`,
       // At 10s cadence, up to 6x the window (in minutes) objects can land
@@ -158,7 +167,7 @@ async function findLatestObject(env, date, now) {
     });
     if (list.objects.length > 0) return list.objects.at(-1);
   }
-  const list = await env.BUCKET.list({ prefix: `raw/${date}/`, limit: 1000 });
+  const list = await listWithRetry(env.BUCKET, { prefix: `raw/${date}/`, limit: 1000 });
   return list.objects.at(-1) ?? null;
 }
 
@@ -179,7 +188,7 @@ async function computeStats(env, date) {
   let partial = false;
 
   for (let page = 0; page < STATS_MAX_PAGES; page++) {
-    const list = await env.BUCKET.list({ prefix, cursor, limit: 1000 });
+    const list = await listWithRetry(env.BUCKET, { prefix, cursor, limit: 1000 });
     for (const obj of list.objects) {
       count++;
       totalBytes += obj.size;
@@ -250,6 +259,21 @@ async function putWithRetry(bucket, key, buf, options) {
       return await bucket.put(key, buf, options);
     } catch (err) {
       if (attempt === PUT_MAX_RETRIES - 1) throw err;
+      await new Promise((r) => setTimeout(r, BASE_DELAY_MS * 2 ** attempt));
+    }
+  }
+}
+
+// R2 rejects list calls that pile up on the same prefix ("Reduce your
+// concurrent request rate for the same object. (10058)") — this happens
+// when a health/stats request lands while a collect cron fire is already
+// touching the same day's prefix. Retrying turns a 500 into a slow 200.
+async function listWithRetry(bucket, options) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await bucket.list(options);
+    } catch (err) {
+      if (attempt === LIST_MAX_RETRIES - 1) throw err;
       await new Promise((r) => setTimeout(r, BASE_DELAY_MS * 2 ** attempt));
     }
   }
@@ -551,5 +575,6 @@ export const __testing = {
   collect,
   fetchFeed,
   putWithRetry,
+  listWithRetry,
   collectStatic,
 };

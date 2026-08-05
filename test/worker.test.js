@@ -292,3 +292,43 @@ describe("putWithRetry()", () => {
     expect(bucket.put).toHaveBeenCalledTimes(3);
   });
 });
+
+describe("listWithRetry()", () => {
+  const RATE_LIMIT = "list: Reduce your concurrent request rate for the same object. (10058)";
+
+  async function listWithTimers(bucket) {
+    // Same settle-capture dance as putWithTimers above.
+    const settled = __testing
+      .listWithRetry(bucket, { prefix: "raw/2026-07-08/" })
+      .then((value) => ({ value }), (error) => ({ error }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    const outcome = await settled;
+    if (outcome.error) throw outcome.error;
+    return outcome.value;
+  }
+
+  it("retries an R2 concurrent-request rate limit and succeeds", async () => {
+    let calls = 0;
+    const bucket = {
+      list: vi.fn(async () => {
+        calls++;
+        if (calls < 3) throw new Error(RATE_LIMIT);
+        return { objects: [], truncated: false };
+      }),
+    };
+
+    await expect(listWithTimers(bucket)).resolves.toEqual({ objects: [], truncated: false });
+    expect(bucket.list).toHaveBeenCalledTimes(3);
+  });
+
+  it("rethrows after the retry budget is exhausted", async () => {
+    const bucket = {
+      list: vi.fn(async () => {
+        throw new Error(RATE_LIMIT);
+      }),
+    };
+
+    await expect(listWithTimers(bucket)).rejects.toThrow("10058");
+    expect(bucket.list).toHaveBeenCalledTimes(3);
+  });
+});
