@@ -15,6 +15,13 @@ const FEED_FETCH_TIMEOUT_MS = 5_000;
 const STATIC_FETCH_TIMEOUT_MS = 60_000;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// Header timestamp of the last snapshot written by a cron fire. Module scope
+// survives across fires while Cloudflare reuses the isolate (usually for
+// many minutes), so the first poll of a fire can skip a snapshot identical
+// to the last poll of the previous fire. Best-effort and free: a fresh
+// isolate starts at null and just writes once, as before.
+let lastWrittenFeedTimestamp = null;
+
 export default {
   // Cron trigger fires every minute; Cloudflare Cron Triggers can't fire
   // faster than 1/min, so we poll every 10s (in six 10s steps per 1-minute
@@ -34,10 +41,11 @@ export default {
         // Shared across the six polls in this cron fire: dedupes
         // back-to-back identical snapshots and throttles Sentry noise to
         // at most one warning of each kind per fire.
-        const state = { lastFeedTimestamp: null, warnedUnavailable: false, warnedStale: false };
+        const state = { lastFeedTimestamp: lastWrittenFeedTimestamp, warnedUnavailable: false, warnedStale: false };
         for (let i = 0; i < POLLS_PER_CRON; i++) {
           const start = Date.now();
           await collect(env, state);
+          lastWrittenFeedTimestamp = state.lastFeedTimestamp;
           if (i < POLLS_PER_CRON - 1) {
             const elapsed = Date.now() - start;
             await new Promise((r) => setTimeout(r, Math.max(0, POLL_INTERVAL_MS - elapsed)));
@@ -135,18 +143,6 @@ async function handleFetch(request, env) {
     return Response.json(await computeStats(env, date));
   }
 
-  // Endpoints below write to R2; when ADMIN_TOKEN is set they require it
-  // (Authorization: Bearer <token> or ?token=<token>).
-  const writes = url.pathname === "/" || url.pathname === "/static";
-  if (writes && !isAuthorized(request, url, env)) {
-    return new Response("unauthorized", { status: 401 });
-  }
-
-  if (url.pathname === "/static") {
-    await collectStatic(env);
-    return new Response("ok");
-  }
-
   if (url.pathname === "/static/latest") {
     const obj = await env.BUCKET.get(STATIC_LATEST_KEY);
     if (!obj) return Response.json({ error: "no static snapshot recorded yet" }, { status: 404 });
@@ -171,14 +167,27 @@ async function handleFetch(request, env) {
     });
   }
 
-  if (url.pathname === "/") {
-    await collect(env, {});
+  // Browsers request these on their own (e.g. when opening /health); they
+  // must not fall through to a collection and an R2 write.
+  if (url.pathname === "/favicon.ico" || url.pathname === "/robots.txt") {
+    return new Response("not found", { status: 404 });
+  }
+
+  // Everything below writes to R2; when ADMIN_TOKEN is set it is required
+  // (Authorization: Bearer <token> or ?token=<token>).
+  if (!isAuthorized(request, url, env)) {
+    return new Response("unauthorized", { status: 401 });
+  }
+
+  if (url.pathname === "/static") {
+    await collectStatic(env);
     return new Response("ok");
   }
 
-  // Anything else (favicon.ico, robots.txt, scanners) used to fall through
-  // to a collection and an R2 write.
-  return new Response("not found", { status: 404 });
+  // Any other path triggers a collection (historical behavior, kept for
+  // backward compatibility with existing callers).
+  await collect(env, {});
+  return new Response("ok");
 }
 
 function isAuthorized(request, url, env) {
@@ -232,6 +241,11 @@ async function computeStats(env, date) {
   let maxGapSecs = 0;
   let prevTs = null;
   let partial = false;
+  // Snapshot count per Kyiv hour ("00".."23"); zeros make outages visible.
+  // The day's UTC offset is computed once rather than formatting a date per
+  // object, which would cost real CPU time on a ~7k-object day.
+  const byHour = Object.fromEntries(Array.from({ length: 24 }, (_, h) => [String(h).padStart(2, "0"), 0]));
+  const offsetHours = kyivUtcOffsetHours(new Date(`${day}T12:00:00Z`));
 
   for (let page = 0; page < STATS_MAX_PAGES; page++) {
     const list = await listWithRetry(env.BUCKET, { prefix, cursor, limit: 1000 });
@@ -240,6 +254,10 @@ async function computeStats(env, date) {
       totalBytes += obj.size;
       const ts = keyToTimestamp(obj.key);
       if (ts !== null) {
+        if (Number.isFinite(offsetHours)) {
+          const h = (new Date(ts).getUTCHours() + offsetHours) % 24;
+          byHour[String(h).padStart(2, "0")]++;
+        }
         if (prevTs !== null) maxGapSecs = Math.max(maxGapSecs, (ts - prevTs) / 1000);
         prevTs = ts;
       }
@@ -255,8 +273,16 @@ async function computeStats(env, date) {
     total_bytes: totalBytes,
     avg_bytes: count > 0 ? Math.round(totalBytes / count) : 0,
     max_gap_seconds: Math.round(maxGapSecs),
+    by_hour_kyiv: byHour,
     partial,
   };
+}
+
+// Kyiv's UTC offset (2 or 3) at a given instant. DST switches at 03:00/04:00
+// Kyiv, inside the 00:00–04:00 window when nothing is collected, so one
+// offset per day is exact for every stored snapshot.
+function kyivUtcOffsetHours(date) {
+  return (kyivHour(date) - date.getUTCHours() + 24) % 24;
 }
 
 function keyToTimestamp(key) {
@@ -361,10 +387,9 @@ async function collect(env, state) {
       }
 
       if (feedInfo.headerTimestamp === state.lastFeedTimestamp) {
-        // identical snapshot to the previous poll this cron fire; skip the write
+        // identical to the last written snapshot; skip the write
         return;
       }
-      state.lastFeedTimestamp = feedInfo.headerTimestamp;
     }
 
     const now = new Date();
@@ -388,6 +413,9 @@ async function collect(env, state) {
         bytes: String(buf.byteLength),
       },
     });
+    // Only after a successful put: a failed write must not make the next
+    // poll skip the same feed as a "duplicate".
+    if (feedInfo.headerTimestamp !== null) state.lastFeedTimestamp = feedInfo.headerTimestamp;
   } catch (err) {
     await captureToSentry(env, err, { tags: { stage: "collect" } });
   }
@@ -655,6 +683,10 @@ export const __testing = {
   keyToTimestamp,
   kyivHour,
   computeStats,
+  kyivUtcOffsetHours,
+  resetDedup: () => {
+    lastWrittenFeedTimestamp = null;
+  },
   findLatestObject,
   collect,
   fetchFeed,

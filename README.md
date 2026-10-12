@@ -7,7 +7,7 @@ A Cloudflare Worker that periodically fetches GTFS-RT (realtime) vehicle positio
 - Cron fires every minute from ~04:00 to midnight Kyiv time (UTC+2); each fire polls the feed every 10s (six 10s steps) since Cloudflare Cron Triggers can't fire faster than once/minute
 - Fetches a protobuf-encoded GTFS-RT feed from `track.ua-gis.com`
 - Stores each snapshot to R2 at `raw/YYYY-MM-DD/YYYY-MM-DDTHH:mm:ss.pb`
-- Skips writing a snapshot if the feed's header timestamp is unchanged since the previous poll (avoids storing duplicate data when the upstream feed hasn't updated yet)
+- Skips writing a snapshot if the feed's header timestamp is unchanged since the last written snapshot (avoids storing duplicate data when the upstream feed hasn't updated yet). This holds across cron fires while Cloudflare reuses the worker isolate; a fresh isolate writes its first snapshot unconditionally
 - Attaches `entityCount`, `feedTimestamp`, and `bytes` as R2 custom metadata on each object
 - Warns via Sentry (at most once per cron fire) if the feed is unreachable or its header timestamp is more than 5 minutes stale
 - Silently skips the 00:00–04:00 window (low transit activity)
@@ -53,14 +53,14 @@ The worker also responds to HTTP for manual triggering and inspection:
 | `GET /` | Trigger a collection immediately and return `ok` |
 | `GET /health` | Health check; `200` if healthy, `503` otherwise. `status` is `stale` when no snapshot was uploaded in the last 3 min, `feed_stale` when uploads are fresh but the latest snapshot's feed header timestamp is >5 min old (upstream frozen), `ok` otherwise or during off-hours. Response includes `age_seconds` (upload) and `feed_age_seconds` (feed header) |
 | `GET /latest` | Metadata (key, size, age, custom metadata) for the most recent snapshot; add `?raw` to stream the `.pb` bytes directly |
-| `GET /stats?date=YYYY-MM-DD` | Snapshot count, total/average bytes, and largest gap between snapshots for a day (defaults to today) |
+| `GET /stats?date=YYYY-MM-DD` | Snapshot count, total/average bytes, and largest gap between snapshots for a day (defaults to today), plus `by_hour_kyiv`: snapshot count per Kyiv hour `"00"`–`"23"` (zeros show outages) |
 | `GET /list` | List objects in R2. Optional `?date=YYYY-MM-DD` (prefix filter), `?limit=N` (default 20, max 1000), `?cursor=...` for pagination; response includes a `cursor` for the next page when truncated |
 | `GET /static` | Trigger a static-feed archive check immediately and return `ok` |
 | `GET /static/latest` | Metadata (key, etag, lastModified, bytes, sha256, date) for the most recently archived static snapshot |
 
-Any other path returns `404`. A malformed `?date` (not `YYYY-MM-DD`) returns `400`.
+`/favicon.ico` and `/robots.txt` return `404`; any other path triggers a collection like `GET /`. A malformed `?date` (not `YYYY-MM-DD`) returns `400`.
 
-`GET /` and `GET /static` write to R2. If the `ADMIN_TOKEN` secret is set (`npx wrangler secret put ADMIN_TOKEN`), they require `Authorization: Bearer <token>` (or `?token=<token>`) and return `401` otherwise; read-only endpoints stay open. Unset, they are public as before.
+`GET /`, `GET /static` and any unlisted path write to R2. If the `ADMIN_TOKEN` secret is set (`npx wrangler secret put ADMIN_TOKEN`), they require `Authorization: Bearer <token>` (or `?token=<token>`) and return `401` otherwise; read-only endpoints stay open. Unset, they are public as before.
 
 ## Data layout
 
