@@ -53,7 +53,7 @@ The worker also responds to HTTP for manual triggering and inspection:
 | `GET /` | Trigger a collection immediately and return `ok` |
 | `GET /health` | Health check; `200` if healthy, `503` otherwise. `status` is `stale` when no snapshot was uploaded in the last 3 min, `feed_stale` when uploads are fresh but the latest snapshot's feed header timestamp is >5 min old (upstream frozen), `ok` otherwise or during off-hours. Response includes `age_seconds` (upload) and `feed_age_seconds` (feed header) |
 | `GET /latest` | Metadata (key, size, age, custom metadata) for the most recent snapshot; add `?raw` to stream the `.pb` bytes directly |
-| `GET /stats?date=YYYY-MM-DD` | Snapshot count, total/average bytes, and largest gap between snapshots for a day (defaults to today), plus `by_hour_kyiv`: snapshot count per Kyiv hour `"00"`–`"23"` (zeros show outages) |
+| `GET /stats?date=YYYY-MM-DD` | Snapshot count, total/average bytes, and largest gap between snapshots for a day (defaults to today), plus `by_hour_kyiv`: snapshot count per Kyiv hour `"00:00"`–`"23:00"`, in chronological order (zeros show outages) |
 | `GET /list` | List objects in R2. Optional `?date=YYYY-MM-DD` (prefix filter), `?limit=N` (default 20, max 1000), `?cursor=...` for pagination; response includes a `cursor` for the next page when truncated |
 | `GET /static` | Trigger a static-feed archive check immediately and return `ok` |
 | `GET /static/latest` | Metadata (key, etag, lastModified, bytes, sha256, date) for the most recently archived static snapshot |
