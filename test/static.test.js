@@ -5,7 +5,7 @@ import worker, { __testing } from "../src/worker.js";
 function mockStaticFeed({
   etag = '"abc123"',
   lastModified = "Thu, 02 Jul 2026 10:22:36 GMT",
-  body = new Uint8Array([1, 2, 3, 4]),
+  body = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 4]),
   status = 200,
 } = {}) {
   vi.stubGlobal(
@@ -60,7 +60,7 @@ describe("collectStatic()", () => {
     expect(head.customMetadata).toEqual({
       etag: '"abc123"',
       lastModified: "Thu, 02 Jul 2026 10:22:36 GMT",
-      bytes: "4",
+      bytes: "8",
     });
 
     const marker = await env.BUCKET.get("static/_latest.json");
@@ -69,6 +69,7 @@ describe("collectStatic()", () => {
       key: "static/2026-07-31/static.zip",
       date: "2026-07-31",
     });
+    expect(JSON.parse(await (await env.BUCKET.get("static/_latest.json")).text()).sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("skips the write when the feed is unchanged (same etag/last-modified)", async () => {
@@ -89,7 +90,11 @@ describe("collectStatic()", () => {
     await __testing.collectStatic(env);
 
     vi.setSystemTime(new Date("2026-08-01T02:00:00.000Z"));
-    mockStaticFeed({ etag: '"def456"', lastModified: "Fri, 31 Jul 2026 09:00:00 GMT" });
+    mockStaticFeed({
+      etag: '"def456"',
+      lastModified: "Fri, 31 Jul 2026 09:00:00 GMT",
+      body: new Uint8Array([0x50, 0x4b, 0x03, 0x04, 9, 9]),
+    });
     await __testing.collectStatic(env);
 
     const dated = await listAll("static/");
@@ -123,6 +128,53 @@ describe("collectStatic()", () => {
       }),
     );
 
+    await __testing.collectStatic(env);
+    expect(await listAll("static/")).toHaveLength(0);
+  });
+});
+
+describe("collectStatic() without usable validators", () => {
+  it("does not re-archive identical content when the server sends no ETag/Last-Modified", async () => {
+    mockStaticFeed({ etag: null, lastModified: null });
+    await __testing.collectStatic(env);
+
+    vi.setSystemTime(new Date("2026-08-01T02:00:00.000Z"));
+    mockStaticFeed({ etag: null, lastModified: null });
+    await __testing.collectStatic(env);
+
+    const zips = (await listAll("static/")).filter((o) => o.key.endsWith("static.zip"));
+    expect(zips.map((o) => o.key)).toEqual(["static/2026-07-31/static.zip"]);
+  });
+
+  it("refreshes the marker but keeps one copy when validators change and content doesn't", async () => {
+    mockStaticFeed({ etag: '"abc123"' });
+    await __testing.collectStatic(env);
+
+    vi.setSystemTime(new Date("2026-08-01T02:00:00.000Z"));
+    mockStaticFeed({ etag: '"def456"' });
+    await __testing.collectStatic(env);
+
+    const zips = (await listAll("static/")).filter((o) => o.key.endsWith("static.zip"));
+    expect(zips).toHaveLength(1);
+    const marker = JSON.parse(await (await env.BUCKET.get("static/_latest.json")).text());
+    expect(marker).toMatchObject({ etag: '"def456"', key: "static/2026-07-31/static.zip", date: "2026-07-31" });
+  });
+
+  it("still archives when HEAD is not supported", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, opts) =>
+        opts?.method === "HEAD"
+          ? new Response(null, { status: 405 })
+          : new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04]), { status: 200 }),
+      ),
+    );
+    await __testing.collectStatic(env);
+    expect(await listAll("static/2026-07-31/")).toHaveLength(1);
+  });
+
+  it("refuses to archive a body that is not a zip", async () => {
+    mockStaticFeed({ body: "<html>maintenance</html>" });
     await __testing.collectStatic(env);
     expect(await listAll("static/")).toHaveLength(0);
   });

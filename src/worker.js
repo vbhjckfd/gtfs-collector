@@ -9,6 +9,11 @@ const POLLS_PER_CRON = 6;
 const STALE_FEED_THRESHOLD_SECS = 300;
 const PUT_MAX_RETRIES = 3;
 const LIST_MAX_RETRIES = 3;
+// A hung upstream must not stall the whole cron fire: each feed attempt has
+// to finish well inside the 10s poll interval.
+const FEED_FETCH_TIMEOUT_MS = 5_000;
+const STATIC_FETCH_TIMEOUT_MS = 60_000;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export default {
   // Cron trigger fires every minute; Cloudflare Cron Triggers can't fire
@@ -104,8 +109,20 @@ async function handleFetch(request, env) {
     });
   }
 
+  const date = url.searchParams.get("date");
+  if (date !== null && !DATE_RE.test(date)) {
+    return Response.json({ error: "date must be YYYY-MM-DD" }, { status: 400 });
+  }
+
   if (url.pathname === "/stats") {
-    return Response.json(await computeStats(env, url.searchParams.get("date")));
+    return Response.json(await computeStats(env, date));
+  }
+
+  // Endpoints below write to R2; when ADMIN_TOKEN is set they require it
+  // (Authorization: Bearer <token> or ?token=<token>).
+  const writes = url.pathname === "/" || url.pathname === "/static";
+  if (writes && !isAuthorized(request, url, env)) {
+    return new Response("unauthorized", { status: 401 });
   }
 
   if (url.pathname === "/static") {
@@ -120,7 +137,6 @@ async function handleFetch(request, env) {
   }
 
   if (url.pathname === "/list") {
-    const date = url.searchParams.get("date");
     const limitParam = parseInt(url.searchParams.get("limit") || "20", 10);
     const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 1000) : 20;
     const cursor = url.searchParams.get("cursor") || undefined;
@@ -138,13 +154,26 @@ async function handleFetch(request, env) {
     });
   }
 
-  await collect(env, {});
-  return new Response("ok");
+  if (url.pathname === "/") {
+    await collect(env, {});
+    return new Response("ok");
+  }
+
+  // Anything else (favicon.ico, robots.txt, scanners) used to fall through
+  // to a collection and an R2 write.
+  return new Response("not found", { status: 404 });
+}
+
+function isAuthorized(request, url, env) {
+  if (!env.ADMIN_TOKEN) return true;
+  const header = request.headers.get("authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : url.searchParams.get("token");
+  return token === env.ADMIN_TOKEN;
 }
 
 function kyivHour(date) {
   return parseInt(
-    date.toLocaleString("en-US", { timeZone: "Europe/Kyiv", hour: "numeric", hour12: false }),
+    date.toLocaleString("en-US", { timeZone: "Europe/Kyiv", hour: "numeric", hourCycle: "h23" }),
     10,
   );
 }
@@ -234,7 +263,7 @@ async function fetchFeed() {
       await new Promise((r) => setTimeout(r, BASE_DELAY_MS * 2 ** attempt));
     }
     try {
-      const res = await fetch(FEED_URL);
+      const res = await fetch(FEED_URL, { signal: AbortSignal.timeout(FEED_FETCH_TIMEOUT_MS) });
       if (!res.ok) {
         failure = `http_${res.status}`;
         continue;
@@ -243,7 +272,7 @@ async function fetchFeed() {
       if (isValidGtfsFeed(buf)) return { buf, failure: null };
       failure = "invalid_body";
     } catch {
-      // network error, timeout, or body read failure
+      // network error, timeout (abort), or body read failure
       failure = "network_error";
     }
   }
@@ -352,7 +381,9 @@ async function collect(env, state) {
 // realtime feed, static rarely changes — a HEAD request's ETag/Last-Modified
 // is compared against the last archived copy (tracked in STATIC_LATEST_KEY)
 // so an unchanged feed costs one small request and no R2 write, not a
-// redundant multi-MB copy every day.
+// redundant multi-MB copy every day. When the server sends no validators
+// (or HEAD isn't supported) the body's SHA-256 is compared instead, so an
+// unchanged feed still isn't re-archived daily.
 //
 // Motivation: gtfs-eta (a downstream consumer) always scores/trains against
 // *current* static, even for past days — if the schedule changes, historical
@@ -360,24 +391,20 @@ async function collect(env, state) {
 // day to the static that was actually in effect.
 async function collectStatic(env) {
   try {
-    const head = await fetch(STATIC_FEED_URL, { method: "HEAD" });
-    if (!head.ok) {
-      await captureToSentry(env, `GTFS static feed HEAD failed (http_${head.status})`, {
-        level: "warning",
-        tags: { stage: "fetch_static" },
-      });
-      return;
-    }
-    const etag = head.headers.get("etag") || "";
-    const lastModified = head.headers.get("last-modified") || "";
-
     const prevObj = await env.BUCKET.get(STATIC_LATEST_KEY);
     const prev = prevObj ? await prevObj.json() : null;
-    if (prev && etag && prev.etag === etag && prev.lastModified === lastModified) {
+
+    // HEAD is only a cheap shortcut; on failure (e.g. 405) fall through to
+    // the GET, which reports its own failure.
+    const head = await fetch(STATIC_FEED_URL, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(STATIC_FETCH_TIMEOUT_MS),
+    });
+    if (head.ok && prev && sameValidators(prev, validators(head))) {
       return; // unchanged since the last archived copy
     }
 
-    const res = await fetch(STATIC_FEED_URL);
+    const res = await fetch(STATIC_FEED_URL, { signal: AbortSignal.timeout(STATIC_FETCH_TIMEOUT_MS) });
     if (!res.ok) {
       await captureToSentry(env, `GTFS static feed GET failed (http_${res.status})`, {
         level: "warning",
@@ -386,6 +413,24 @@ async function collectStatic(env) {
       return;
     }
     const buf = await res.arrayBuffer();
+    if (!isZip(buf)) {
+      await captureToSentry(env, "GTFS static feed is not a zip archive", {
+        level: "warning",
+        tags: { stage: "fetch_static" },
+      });
+      return;
+    }
+
+    const sha256 = await sha256Hex(buf);
+    const { etag, lastModified } = validators(res);
+    if (prev?.sha256 === sha256) {
+      // Validators changed but content didn't: keep the existing dated copy,
+      // just refresh the marker so tomorrow's HEAD can short-circuit again.
+      await putWithRetry(env.BUCKET, STATIC_LATEST_KEY, JSON.stringify({ ...prev, etag, lastModified }), {
+        httpMetadata: { contentType: "application/json" },
+      });
+      return;
+    }
 
     const day = new Date().toISOString().slice(0, 10);
     const key = `static/${day}/static.zip`;
@@ -395,12 +440,34 @@ async function collectStatic(env) {
       httpMetadata: { contentType: "application/zip" },
       customMetadata: meta,
     });
-    await env.BUCKET.put(STATIC_LATEST_KEY, JSON.stringify({ ...meta, key, date: day }), {
+    await putWithRetry(env.BUCKET, STATIC_LATEST_KEY, JSON.stringify({ ...meta, sha256, key, date: day }), {
       httpMetadata: { contentType: "application/json" },
     });
   } catch (err) {
     await captureToSentry(env, err, { tags: { stage: "collect_static" } });
   }
+}
+
+function validators(res) {
+  return { etag: res.headers.get("etag") || "", lastModified: res.headers.get("last-modified") || "" };
+}
+
+// Only trusted when the server actually sent at least one validator; two
+// empty strings would otherwise "match" forever.
+function sameValidators(prev, cur) {
+  if (!cur.etag && !cur.lastModified) return false;
+  return prev.etag === cur.etag && prev.lastModified === cur.lastModified;
+}
+
+function isZip(buf) {
+  // Local file header signature "PK\x03\x04"
+  const b = new Uint8Array(buf, 0, Math.min(4, buf.byteLength));
+  return b.length === 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
+}
+
+async function sha256Hex(buf) {
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 // --- Minimal dependency-free protobuf field walker ---

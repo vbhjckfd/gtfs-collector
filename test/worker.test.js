@@ -61,6 +61,45 @@ describe("GET / (manual trigger)", () => {
   });
 });
 
+describe("routing and auth", () => {
+  it("returns 404 for unknown paths instead of collecting", async () => {
+    const fetchMock = vi.fn(async () => new Response(buildFeedMessage({ timestamp: 1 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await run(new Request("https://example.com/favicon.ico"));
+    expect(res.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await listAll()).toHaveLength(0);
+  });
+
+  it("rejects a malformed ?date", async () => {
+    const res = await run(new Request("https://example.com/stats?date=2026-07"));
+    expect(res.status).toBe(400);
+  });
+
+  it("requires ADMIN_TOKEN for write endpoints when configured", async () => {
+    mockFeedOnce(buildFeedMessage({ timestamp: 1_700_000_000 }));
+    const authedEnv = { ...env, ADMIN_TOKEN: "s3cret" };
+    const call = async (req) => {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, authedEnv, ctx);
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+
+    expect((await call(new Request("https://example.com/"))).status).toBe(401);
+    expect((await call(new Request("https://example.com/static"))).status).toBe(401);
+    expect(await listAll()).toHaveLength(0);
+
+    const ok = await call(new Request("https://example.com/", { headers: { Authorization: "Bearer s3cret" } }));
+    expect(ok.status).toBe(200);
+    expect(await listAll()).toHaveLength(1);
+
+    // read-only endpoints stay open
+    expect((await call(new Request("https://example.com/stats"))).status).toBe(200);
+  });
+});
+
 describe("GET /list", () => {
   it("defaults to the 20 most recent objects with no filters", async () => {
     mockFeedOnce(buildFeedMessage({ timestamp: 1_700_000_001, entityCount: 1 }));

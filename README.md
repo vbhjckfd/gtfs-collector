@@ -56,7 +56,11 @@ The worker also responds to HTTP for manual triggering and inspection:
 | `GET /stats?date=YYYY-MM-DD` | Snapshot count, total/average bytes, and largest gap between snapshots for a day (defaults to today) |
 | `GET /list` | List objects in R2. Optional `?date=YYYY-MM-DD` (prefix filter), `?limit=N` (default 20, max 1000), `?cursor=...` for pagination; response includes a `cursor` for the next page when truncated |
 | `GET /static` | Trigger a static-feed archive check immediately and return `ok` |
-| `GET /static/latest` | Metadata (key, etag, lastModified, bytes, date) for the most recently archived static snapshot |
+| `GET /static/latest` | Metadata (key, etag, lastModified, bytes, sha256, date) for the most recently archived static snapshot |
+
+Any other path returns `404`. A malformed `?date` (not `YYYY-MM-DD`) returns `400`.
+
+`GET /` and `GET /static` write to R2. If the `ADMIN_TOKEN` secret is set (`npx wrangler secret put ADMIN_TOKEN`), they require `Authorization: Bearer <token>` (or `?token=<token>`) and return `401` otherwise; read-only endpoints stay open. Unset, they are public as before.
 
 ## Data layout
 
@@ -71,10 +75,10 @@ static/
     static.zip
   2026-07-15/
     static.zip
-  _latest.json   # {etag, lastModified, bytes, key, date} of the most recent archived copy
+  _latest.json   # {etag, lastModified, bytes, sha256, key, date} of the most recent archived copy
 ```
 
-Each `.pb` file is a raw GTFS-RT `FeedMessage` protobuf, content-type `application/x-protobuf`. Each `static.zip` is the upstream GTFS static feed unmodified; a new dated copy only appears when it actually changed.
+Each `.pb` file is a raw GTFS-RT `FeedMessage` protobuf, content-type `application/x-protobuf`. Each `static.zip` is the upstream GTFS static feed unmodified; a new dated copy only appears when it actually changed (ETag/Last-Modified, falling back to the body's SHA-256 when the server sends no validators or they change without the content changing). A response that isn't a zip archive is rejected rather than archived.
 
 ## Feed source
 
