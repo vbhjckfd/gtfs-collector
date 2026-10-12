@@ -75,13 +75,30 @@ async function handleFetch(request, env) {
     const latest = await findLatestObject(env, today, now);
     const ageSecs = latest ? Math.round((now - latest.uploaded) / 1000) : null;
 
+    // Fresh uploads alone don't prove fresh data: if upstream freezes, the
+    // first poll of every cron fire still writes a snapshot (dedup is
+    // per-fire), so also check the feed's own header timestamp.
+    const head = latest ? await env.BUCKET.head(latest.key) : null;
+    const feedTs = parseInt(head?.customMetadata?.feedTimestamp ?? "", 10);
+    const feedAgeSecs = Number.isFinite(feedTs) ? Math.round(now / 1000 - feedTs) : null;
+
     const hour = kyivHour(now);
     const offHours = hour >= 0 && hour < 4;
-    const healthy = offHours || (ageSecs !== null && ageSecs <= 180);
+    let status = "ok";
+    if (!offHours) {
+      if (ageSecs === null || ageSecs > 180) status = "stale";
+      else if (feedAgeSecs !== null && feedAgeSecs > STALE_FEED_THRESHOLD_SECS) status = "feed_stale";
+    }
 
     return Response.json(
-      { status: healthy ? "ok" : "stale", last_upload: latest?.uploaded ?? null, age_seconds: ageSecs, off_hours: offHours },
-      { status: healthy ? 200 : 503 },
+      {
+        status,
+        last_upload: latest?.uploaded ?? null,
+        age_seconds: ageSecs,
+        feed_age_seconds: feedAgeSecs,
+        off_hours: offHours,
+      },
+      { status: status === "ok" ? 200 : 503 },
     );
   }
 
