@@ -181,8 +181,9 @@ describe("GET /stats", () => {
     expect(body.max_gap_seconds).toBe(30);
     expect(body.partial).toBe(false);
     // 04:00Z is 07:00 Kyiv in summer (UTC+3)
-    expect(body.by_hour_kyiv["07"]).toBe(3);
-    expect(Object.keys(body.by_hour_kyiv)).toHaveLength(24);
+    expect(body.by_hour_kyiv["07:00"]).toBe(3);
+    // chronological key order in the serialized JSON
+    expect(Object.keys(body.by_hour_kyiv)).toEqual(Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`));
     expect(Object.values(body.by_hour_kyiv).reduce((a, b) => a + b, 0)).toBe(3);
   });
 

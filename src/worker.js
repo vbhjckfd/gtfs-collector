@@ -241,10 +241,12 @@ async function computeStats(env, date) {
   let maxGapSecs = 0;
   let prevTs = null;
   let partial = false;
-  // Snapshot count per Kyiv hour ("00".."23"); zeros make outages visible.
+  // Snapshot count per Kyiv hour ("00:00".."23:00"); zeros make outages
+  // visible. Keys must not look like integers ("04", "10"): JS orders
+  // integer-like keys numerically ahead of the rest, scrambling the JSON.
   // The day's UTC offset is computed once rather than formatting a date per
   // object, which would cost real CPU time on a ~7k-object day.
-  const byHour = Object.fromEntries(Array.from({ length: 24 }, (_, h) => [String(h).padStart(2, "0"), 0]));
+  const byHour = Object.fromEntries(Array.from({ length: 24 }, (_, h) => [hourKey(h), 0]));
   const offsetHours = kyivUtcOffsetHours(new Date(`${day}T12:00:00Z`));
 
   for (let page = 0; page < STATS_MAX_PAGES; page++) {
@@ -256,7 +258,7 @@ async function computeStats(env, date) {
       if (ts !== null) {
         if (Number.isFinite(offsetHours)) {
           const h = (new Date(ts).getUTCHours() + offsetHours) % 24;
-          byHour[String(h).padStart(2, "0")]++;
+          byHour[hourKey(h)]++;
         }
         if (prevTs !== null) maxGapSecs = Math.max(maxGapSecs, (ts - prevTs) / 1000);
         prevTs = ts;
@@ -276,6 +278,10 @@ async function computeStats(env, date) {
     by_hour_kyiv: byHour,
     partial,
   };
+}
+
+function hourKey(h) {
+  return `${String(h).padStart(2, "0")}:00`;
 }
 
 // Kyiv's UTC offset (2 or 3) at a given instant. DST switches at 03:00/04:00
