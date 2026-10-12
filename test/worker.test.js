@@ -82,9 +82,14 @@ describe("routing and auth", () => {
     expect(await listAll()).toHaveLength(1);
   });
 
-  it("rejects a malformed ?date", async () => {
+  it("answers a malformed ?date with an empty result, not an error", async () => {
     const res = await run(new Request("https://example.com/stats?date=2026-07"));
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    expect((await res.json()).count).toBe(0);
+
+    const list = await run(new Request("https://example.com/list?date=nope"));
+    expect(list.status).toBe(200);
+    expect((await list.json()).count).toBe(0);
   });
 
   it("requires ADMIN_TOKEN for write endpoints when configured", async () => {

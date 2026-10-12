@@ -13,7 +13,6 @@ const LIST_MAX_RETRIES = 3;
 // to finish well inside the 10s poll interval.
 const FEED_FETCH_TIMEOUT_MS = 5_000;
 const STATIC_FETCH_TIMEOUT_MS = 60_000;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Header timestamp of the last snapshot written by a cron fire. Module scope
 // survives across fires while Cloudflare reuses the isolate (usually for
@@ -135,9 +134,6 @@ async function handleFetch(request, env) {
   }
 
   const date = url.searchParams.get("date");
-  if (date !== null && !DATE_RE.test(date)) {
-    return Response.json({ error: "date must be YYYY-MM-DD" }, { status: 400 });
-  }
 
   if (url.pathname === "/stats") {
     return Response.json(await computeStats(env, date));
@@ -147,6 +143,30 @@ async function handleFetch(request, env) {
     const obj = await env.BUCKET.get(STATIC_LATEST_KEY);
     if (!obj) return Response.json({ error: "no static snapshot recorded yet" }, { status: 404 });
     return new Response(obj.body, { headers: { "Content-Type": "application/json" } });
+  }
+
+  if (url.pathname === "/static/list") {
+    const limitParam = parseInt(url.searchParams.get("limit") || "100", 10);
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 1000) : 100;
+    const cursor = url.searchParams.get("cursor") || undefined;
+
+    // customMetadata rides along on the same list call; no per-object head.
+    const list = await listWithRetry(env.BUCKET, { prefix: "static/", limit, cursor, include: ["customMetadata"] });
+    const snapshots = list.objects
+      .filter((o) => o.key.endsWith("/static.zip"))
+      .map((o) => ({
+        date: o.key.split("/")[1],
+        key: o.key,
+        size: o.size,
+        uploaded: o.uploaded,
+        etag: o.customMetadata?.etag ?? "",
+        lastModified: o.customMetadata?.lastModified ?? "",
+      }));
+    return Response.json({
+      count: snapshots.length,
+      snapshots,
+      cursor: list.truncated ? list.cursor : null,
+    });
   }
 
   if (url.pathname === "/list") {

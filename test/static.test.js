@@ -191,6 +191,39 @@ describe("GET /static", () => {
   });
 });
 
+describe("GET /static/list", () => {
+  it("lists archived static snapshots oldest first, without the marker", async () => {
+    mockStaticFeed({ etag: '"abc123"' });
+    await __testing.collectStatic(env);
+    vi.setSystemTime(new Date("2026-08-01T02:00:00.000Z"));
+    mockStaticFeed({ etag: '"def456"', body: new Uint8Array([0x50, 0x4b, 0x03, 0x04, 9]) });
+    await __testing.collectStatic(env);
+
+    const res = await run(new Request("https://example.com/static/list"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.count).toBe(2);
+    expect(body.cursor).toBe(null);
+    expect(body.snapshots.map((s) => [s.date, s.key, s.etag])).toEqual([
+      ["2026-07-31", "static/2026-07-31/static.zip", '"abc123"'],
+      ["2026-08-01", "static/2026-08-01/static.zip", '"def456"'],
+    ]);
+    expect(body.snapshots[0].size).toBe(8);
+  });
+
+  it("returns an empty list when nothing has been archived", async () => {
+    const body = await (await run(new Request("https://example.com/static/list"))).json();
+    expect(body).toEqual({ count: 0, snapshots: [], cursor: null });
+  });
+
+  it("does not trigger a collection", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await run(new Request("https://example.com/static/list"));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("GET /static/latest", () => {
   it("returns 404 when nothing has been archived yet", async () => {
     const res = await run(new Request("https://example.com/static/latest"));
