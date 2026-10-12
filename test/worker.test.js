@@ -208,6 +208,46 @@ describe("GET /health", () => {
   });
 });
 
+describe("GET /health feed staleness", () => {
+  const now = new Date("2026-07-08T07:00:00Z");
+  const putSnapshot = (feedTimestamp) =>
+    env.BUCKET.put(`raw/2026-07-08/${now.toISOString()}.pb`, new Uint8Array(1), {
+      customMetadata: { entityCount: "1", feedTimestamp, bytes: "1" },
+    });
+
+  it("is ok when the latest snapshot carries a fresh feed timestamp", async () => {
+    vi.setSystemTime(new Date(now.getTime() + 5_000));
+    await putSnapshot(String(now.getTime() / 1000 - 30));
+
+    const res = await run(new Request("https://example.com/health"));
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("ok");
+    expect(body.feed_age_seconds).toBe(35);
+  });
+
+  it("reports feed_stale when uploads are fresh but the feed timestamp is old", async () => {
+    vi.setSystemTime(new Date(now.getTime() + 5_000));
+    await putSnapshot(String(now.getTime() / 1000 - 600));
+
+    const res = await run(new Request("https://example.com/health"));
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(body.status).toBe("feed_stale");
+    expect(body.feed_age_seconds).toBe(605);
+  });
+
+  it("ignores a snapshot with no feed timestamp", async () => {
+    vi.setSystemTime(new Date(now.getTime() + 5_000));
+    await putSnapshot("");
+
+    const res = await run(new Request("https://example.com/health"));
+    const body = await res.json();
+    expect(body.feed_age_seconds).toBe(null);
+    expect(body.status).not.toBe("feed_stale");
+  });
+});
+
 describe("collect() dedup and staleness", () => {
   it("skips writing a duplicate snapshot with an unchanged feed timestamp", async () => {
     const state = { lastFeedTimestamp: null, warnedUnavailable: false, warnedStale: false };
