@@ -56,9 +56,10 @@ The worker also responds to HTTP for manual triggering and inspection:
 | `GET /stats?date=YYYY-MM-DD` | Snapshot count, total/average bytes, and largest gap between snapshots for a day (defaults to today), plus `by_hour_kyiv`: snapshot count per Kyiv hour `"00:00"`–`"23:00"`, in chronological order (zeros show outages) |
 | `GET /list` | List objects in R2. Optional `?date=YYYY-MM-DD` (prefix filter), `?limit=N` (default 20, max 1000), `?cursor=...` for pagination; response includes a `cursor` for the next page when truncated |
 | `GET /static` | Trigger a static-feed archive check immediately and return `ok` |
+| `GET /static/list` | Archived static snapshots, oldest first: `date`, `key`, `size`, `uploaded`, `etag`, `lastModified`. Optional `?limit=N` (default 100, max 1000) and `?cursor=...`; response includes a `cursor` for the next page when truncated |
 | `GET /static/latest` | Metadata (key, etag, lastModified, bytes, sha256, date) for the most recently archived static snapshot |
 
-`/favicon.ico` and `/robots.txt` return `404`; any other path triggers a collection like `GET /`. A malformed `?date` (not `YYYY-MM-DD`) returns `400`.
+`/favicon.ico` and `/robots.txt` return `404`; any other path triggers a collection like `GET /`.
 
 `GET /`, `GET /static` and any unlisted path write to R2. If the `ADMIN_TOKEN` secret is set (`npx wrangler secret put ADMIN_TOKEN`), they require `Authorization: Bearer <token>` (or `?token=<token>`) and return `401` otherwise; read-only endpoints stay open. Unset, they are public as before.
 
