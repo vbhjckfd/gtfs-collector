@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { __testing } from "../src/worker.js";
 import { buildFeedMessage } from "./protobuf-helpers.js";
 
-const { isValidGtfsFeed, parseFeedInfo, readVarint, keyToTimestamp, kyivHour } = __testing;
+const { isValidGtfsFeed, parseFeedInfo, readVarint, keyToTimestamp, kyivHour, kyivUtcOffsetHours } = __testing;
 
 describe("readVarint", () => {
   it("decodes single-byte varints", () => {
@@ -88,5 +88,17 @@ describe("kyivHour", () => {
   it("converts a known UTC instant to the correct Kyiv hour", () => {
     // 2026-07-08T10:00:00Z is summer (UTC+3 under DST) -> 13:00 Kyiv
     expect(kyivHour(new Date("2026-07-08T10:00:00Z"))).toBe(13);
+  });
+});
+
+describe("kyivUtcOffsetHours", () => {
+  it("is +3 in summer and +2 in winter", () => {
+    expect(kyivUtcOffsetHours(new Date("2026-07-08T12:00:00Z"))).toBe(3);
+    expect(kyivUtcOffsetHours(new Date("2026-01-15T12:00:00Z"))).toBe(2);
+  });
+
+  it("uses the post-switch offset on DST change days", () => {
+    expect(kyivUtcOffsetHours(new Date("2026-03-29T12:00:00Z"))).toBe(3);
+    expect(kyivUtcOffsetHours(new Date("2026-10-25T12:00:00Z"))).toBe(2);
   });
 });

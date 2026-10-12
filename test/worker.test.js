@@ -62,14 +62,24 @@ describe("GET / (manual trigger)", () => {
 });
 
 describe("routing and auth", () => {
-  it("returns 404 for unknown paths instead of collecting", async () => {
+  it("returns 404 for favicon.ico and robots.txt without collecting", async () => {
     const fetchMock = vi.fn(async () => new Response(buildFeedMessage({ timestamp: 1 }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const res = await run(new Request("https://example.com/favicon.ico"));
-    expect(res.status).toBe(404);
+    for (const path of ["/favicon.ico", "/robots.txt"]) {
+      const res = await run(new Request(`https://example.com${path}`));
+      expect(res.status).toBe(404);
+    }
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await listAll()).toHaveLength(0);
+  });
+
+  it("still collects on any other unknown path (backward compatible)", async () => {
+    mockFeedOnce(buildFeedMessage({ timestamp: 1_700_000_000 }));
+    const res = await run(new Request("https://example.com/collect"));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    expect(await listAll()).toHaveLength(1);
   });
 
   it("rejects a malformed ?date", async () => {
@@ -89,6 +99,7 @@ describe("routing and auth", () => {
 
     expect((await call(new Request("https://example.com/"))).status).toBe(401);
     expect((await call(new Request("https://example.com/static"))).status).toBe(401);
+    expect((await call(new Request("https://example.com/collect"))).status).toBe(401);
     expect(await listAll()).toHaveLength(0);
 
     const ok = await call(new Request("https://example.com/", { headers: { Authorization: "Bearer s3cret" } }));
@@ -169,6 +180,10 @@ describe("GET /stats", () => {
     expect(body.avg_bytes).toBe(20);
     expect(body.max_gap_seconds).toBe(30);
     expect(body.partial).toBe(false);
+    // 04:00Z is 07:00 Kyiv in summer (UTC+3)
+    expect(body.by_hour_kyiv["07"]).toBe(3);
+    expect(Object.keys(body.by_hour_kyiv)).toHaveLength(24);
+    expect(Object.values(body.by_hour_kyiv).reduce((a, b) => a + b, 0)).toBe(3);
   });
 
   it("defaults to today when no ?date is given", async () => {
@@ -280,6 +295,45 @@ describe("collect() dedup and staleness", () => {
 
     const objects = await listAll();
     expect(objects).toHaveLength(2);
+  });
+});
+
+describe("collect() write failures", () => {
+  it("does not treat a feed whose write failed as already stored", async () => {
+    vi.useRealTimers(); // putWithRetry backs off with real (short) delays
+    const state = { lastFeedTimestamp: null, warnedUnavailable: false, warnedStale: false };
+    mockFeedOnce(buildFeedMessage({ timestamp: 1_700_000_040 }));
+    const failingEnv = { ...env, BUCKET: { put: vi.fn(async () => { throw new Error("boom"); }) } };
+
+    await __testing.collect(failingEnv, state);
+    expect(state.lastFeedTimestamp).toBe(null);
+
+    await __testing.collect(env, state);
+    expect(await listAll()).toHaveLength(1);
+  });
+});
+
+describe("scheduled() dedup across cron fires", () => {
+  async function fire() {
+    const ctx = createExecutionContext();
+    await worker.scheduled({ cron: "* 1-21 * * *" }, env, ctx);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitOnExecutionContext(ctx);
+  }
+
+  it("skips the first poll of a fire when the feed hasn't changed since the previous fire", async () => {
+    __testing.resetDedup();
+    mockFeedOnce(buildFeedMessage({ timestamp: 1_700_000_050 }));
+
+    await fire();
+    expect(await listAll()).toHaveLength(1);
+
+    await fire();
+    expect(await listAll()).toHaveLength(1);
+
+    mockFeedOnce(buildFeedMessage({ timestamp: 1_700_000_060 }));
+    await fire();
+    expect(await listAll()).toHaveLength(2);
   });
 });
 
