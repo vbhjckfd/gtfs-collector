@@ -405,7 +405,7 @@ async function collect(env, state) {
       return;
     }
 
-    let feedInfo = { headerTimestamp: null, entityCount: 0 };
+    let feedInfo = { headerTimestamp: null };
     try {
       feedInfo = parseFeedInfo(buf);
     } catch {
@@ -437,7 +437,7 @@ async function collect(env, state) {
     if (env.ANALYTICS) {
       env.ANALYTICS.writeDataPoint({
         blobs: [key],
-        doubles: [buf.byteLength, feedInfo.entityCount],
+        doubles: [buf.byteLength],
         indexes: ["gtfs-collector"],
       });
     }
@@ -445,7 +445,6 @@ async function collect(env, state) {
     await putWithRetry(env.BUCKET, key, buf, {
       httpMetadata: { contentType: "application/x-protobuf" },
       customMetadata: {
-        entityCount: String(feedInfo.entityCount),
         feedTimestamp: feedInfo.headerTimestamp !== null ? String(feedInfo.headerTimestamp) : "",
         bytes: String(buf.byteLength),
       },
@@ -553,10 +552,9 @@ async function sha256Hex(buf) {
 }
 
 // --- Minimal dependency-free protobuf field walker ---
-// We only need two things out of the GTFS-RT FeedMessage: the header
-// timestamp (for dedup + staleness detection) and a count of top-level
-// entities (for metadata). A full protobuf runtime is overkill for that,
-// so this walks tags and skips values by wire type instead.
+// We only need the GTFS-RT FeedMessage's header timestamp (for dedup +
+// staleness detection). A full protobuf runtime is overkill for that, so
+// this walks tags and skips values by wire type instead.
 
 function readVarint(view, offset) {
   let result = 0;
@@ -599,9 +597,11 @@ function parseFeedInfo(buf) {
   const view = new DataView(buf);
   const size = buf.byteLength;
   let offset = 0;
-  let headerTimestamp = null;
-  let entityCount = 0;
 
+  // Stops at the FeedHeader. Serializers write fields in number order, so
+  // the header (field 1) comes first and the ~600 entities after it are
+  // never walked; profiling showed walking them was ~20% of a cron fire's
+  // CPU time.
   while (offset < size) {
     const [tag, tagLen] = readVarint(view, offset);
     offset += tagLen;
@@ -609,21 +609,14 @@ function parseFeedInfo(buf) {
     const wireType = tag & 0x7;
 
     if (fieldNumber === 1 && wireType === 2) {
-      // FeedHeader submessage
       const [len, lenBytes] = readVarint(view, offset);
       offset += lenBytes;
-      headerTimestamp = parseHeaderTimestamp(view, offset, offset + len);
-      offset += len;
-    } else if (fieldNumber === 2 && wireType === 2) {
-      // FeedEntity — only counted, not decoded
-      entityCount++;
-      offset = skipField(view, offset, wireType);
-    } else {
-      offset = skipField(view, offset, wireType);
+      return { headerTimestamp: parseHeaderTimestamp(view, offset, offset + len) };
     }
+    offset = skipField(view, offset, wireType);
   }
 
-  return { headerTimestamp, entityCount };
+  return { headerTimestamp: null };
 }
 
 function parseHeaderTimestamp(view, start, end) {

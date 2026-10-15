@@ -54,7 +54,6 @@ describe("GET / (manual trigger)", () => {
 
     const head = await env.BUCKET.head(objects[0].key);
     expect(head.customMetadata).toEqual({
-      entityCount: "3",
       feedTimestamp: "1700000000",
       bytes: String(head.size),
     });
@@ -153,7 +152,6 @@ describe("GET /latest", () => {
     const res = await run(new Request("https://example.com/latest"));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.entityCount).toBe("7");
     expect(body.feedTimestamp).toBe("1700000002");
     expect(typeof body.age_seconds).toBe("number");
   });
@@ -233,7 +231,7 @@ describe("GET /health feed staleness", () => {
   const now = new Date("2026-07-08T07:00:00Z");
   const putSnapshot = (feedTimestamp) =>
     env.BUCKET.put(`raw/2026-07-08/${now.toISOString()}.pb`, new Uint8Array(1), {
-      customMetadata: { entityCount: "1", feedTimestamp, bytes: "1" },
+      customMetadata: { feedTimestamp, bytes: "1" },
     });
 
   it("is ok when the latest snapshot carries a fresh feed timestamp", async () => {
