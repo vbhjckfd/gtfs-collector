@@ -8,7 +8,7 @@ A Cloudflare Worker that periodically fetches GTFS-RT (realtime) vehicle positio
 - Fetches a protobuf-encoded GTFS-RT feed from `track.ua-gis.com`
 - Stores each snapshot to R2 at `raw/YYYY-MM-DD/YYYY-MM-DDTHH:mm:ss.pb`
 - Skips writing a snapshot if the feed's header timestamp is unchanged since the last written snapshot (avoids storing duplicate data when the upstream feed hasn't updated yet). This holds across cron fires while Cloudflare reuses the worker isolate; a fresh isolate writes its first snapshot unconditionally
-- Attaches `entityCount`, `feedTimestamp`, and `bytes` as R2 custom metadata on each object
+- Attaches `feedTimestamp` and `bytes` as R2 custom metadata on each object
 - Warns via Sentry (at most once per cron fire) if the feed is unreachable or its header timestamp is more than 5 minutes stale
 - Retries transient failures (feed fetch, R2 put, R2 list) with exponential backoff and times out hung requests; see [Reliability](#reliability)
 - Silently skips the 00:00–04:00 window (low transit activity)

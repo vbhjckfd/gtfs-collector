@@ -25,24 +25,24 @@ describe("readVarint", () => {
 });
 
 describe("parseFeedInfo", () => {
-  it("extracts header timestamp and counts entities", () => {
+  it("extracts the header timestamp", () => {
     const buf = buildFeedMessage({ timestamp: 1_700_000_000, entityCount: 5 });
-    const info = parseFeedInfo(buf);
-    expect(info.headerTimestamp).toBe(1_700_000_000);
-    expect(info.entityCount).toBe(5);
+    expect(parseFeedInfo(buf)).toEqual({ headerTimestamp: 1_700_000_000 });
   });
 
   it("returns null timestamp when the header has none", () => {
     const buf = buildFeedMessage({ entityCount: 2, timestamp: undefined });
-    const info = parseFeedInfo(buf);
-    expect(info.headerTimestamp).toBeNull();
-    expect(info.entityCount).toBe(2);
+    expect(parseFeedInfo(buf).headerTimestamp).toBeNull();
   });
 
-  it("handles zero entities", () => {
-    const buf = buildFeedMessage({ timestamp: 1_700_000_000, entityCount: 0 });
-    const info = parseFeedInfo(buf);
-    expect(info.entityCount).toBe(0);
+  it("stops at the header without walking the entities", () => {
+    // Garbage after the header (wire type 7 is invalid) would throw if the
+    // parser kept going.
+    const feed = new Uint8Array(buildFeedMessage({ timestamp: 1_700_000_000 }));
+    const buf = new Uint8Array(feed.length + 1);
+    buf.set(feed);
+    buf[feed.length] = 0x0f;
+    expect(parseFeedInfo(buf.buffer).headerTimestamp).toBe(1_700_000_000);
   });
 
   it("throws on truncated/malformed input rather than looping forever", () => {
