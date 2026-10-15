@@ -23,7 +23,7 @@ async function listAll() {
 }
 
 beforeEach(async () => {
-  // vitest-pool-workers gives each test an isolated storage snapshot per
+  // vitest-plugin gives each test an isolated storage snapshot per
   // file, but clear explicitly so test order within this file can't leak.
   const objects = await listAll();
   await Promise.all(objects.map((o) => env.BUCKET.delete(o.key)));

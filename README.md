@@ -139,7 +139,7 @@ Requires Node 26 (`.nvmrc`; `engine-strict` is on).
 
 ```sh
 make install    # nvm use + npm install
-npm test        # vitest in the Workers runtime (@cloudflare/vitest-pool-workers)
+npm test        # vitest in the Workers runtime (@cloudflare/vitest-plugin)
 npm run dev     # wrangler dev
 ```
 
