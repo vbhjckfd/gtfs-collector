@@ -101,4 +101,15 @@ describe("kyivUtcOffsetHours", () => {
     expect(kyivUtcOffsetHours(new Date("2026-03-29T12:00:00Z"))).toBe(3);
     expect(kyivUtcOffsetHours(new Date("2026-10-25T12:00:00Z"))).toBe(2);
   });
+
+  it("matches the IANA Europe/Kyiv zone hour by hour across 2024-2030", () => {
+    const intlHour = (d) =>
+      parseInt(d.toLocaleString("en-US", { timeZone: "Europe/Kyiv", hour: "numeric", hourCycle: "h23" }), 10);
+    const mismatches = [];
+    for (let t = Date.UTC(2024, 0, 1); t < Date.UTC(2031, 0, 1); t += 3600_000) {
+      const d = new Date(t);
+      if (kyivHour(d) !== intlHour(d)) mismatches.push(d.toISOString());
+    }
+    expect(mismatches).toEqual([]);
+  });
 });

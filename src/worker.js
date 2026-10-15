@@ -217,11 +217,29 @@ function isAuthorized(request, url, env) {
   return token === env.ADMIN_TOKEN;
 }
 
+// Computed with the EU DST rule instead of Intl: the first time-zone-aware
+// toLocaleString in a fresh isolate loads ICU zone data, which measured
+// 16-20 ms of CPU, more than the free plan's 10 ms per invocation. Every
+// cron fire calls this before anything else.
 function kyivHour(date) {
-  return parseInt(
-    date.toLocaleString("en-US", { timeZone: "Europe/Kyiv", hour: "numeric", hourCycle: "h23" }),
-    10,
-  );
+  return (date.getUTCHours() + kyivUtcOffsetHours(date)) % 24;
+}
+
+// Kyiv's UTC offset (2 or 3) at a given instant. Ukraine follows the EU
+// rule: UTC+3 from 01:00 UTC on the last Sunday of March until 01:00 UTC on
+// the last Sunday of October. DST switches at 03:00/04:00 Kyiv, inside the
+// 00:00–04:00 window when nothing is collected, so one offset per day is
+// exact for every stored snapshot. If Ukraine drops DST, change this.
+function kyivUtcOffsetHours(date) {
+  const year = date.getUTCFullYear();
+  const t = date.getTime();
+  return t >= lastSundayUtc(year, 2) && t < lastSundayUtc(year, 9) ? 3 : 2;
+}
+
+// 01:00 UTC on the last Sunday of the given month (0-based).
+function lastSundayUtc(year, month) {
+  const lastDay = new Date(Date.UTC(year, month + 1, 0));
+  return Date.UTC(year, month, lastDay.getUTCDate() - lastDay.getUTCDay(), 1);
 }
 
 // Finds the most recently uploaded object for a given day without paging
@@ -302,13 +320,6 @@ async function computeStats(env, date) {
 
 function hourKey(h) {
   return `${String(h).padStart(2, "0")}:00`;
-}
-
-// Kyiv's UTC offset (2 or 3) at a given instant. DST switches at 03:00/04:00
-// Kyiv, inside the 00:00–04:00 window when nothing is collected, so one
-// offset per day is exact for every stored snapshot.
-function kyivUtcOffsetHours(date) {
-  return (kyivHour(date) - date.getUTCHours() + 24) % 24;
 }
 
 function keyToTimestamp(key) {
