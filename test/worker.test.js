@@ -341,6 +341,74 @@ describe("scheduled() dedup across cron fires", () => {
   });
 });
 
+describe("scheduled() New Relic event", () => {
+  const nrEnv = { ...env, NEW_RELIC_LICENSE_KEY: "test-key" };
+
+  function mockFeedAndNewRelic(feed) {
+    const events = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (String(url).includes("nr-data.net")) {
+          events.push(...JSON.parse(init.body));
+          return new Response("", { status: 202 });
+        }
+        return new Response(feed, { status: 200 });
+      }),
+    );
+    return events;
+  }
+
+  async function fire(fireEnv) {
+    const ctx = createExecutionContext();
+    await worker.scheduled({ cron: "* 1-21 * * *" }, fireEnv, ctx);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitOnExecutionContext(ctx);
+  }
+
+  it("sends one summary event per fire with the poll outcomes", async () => {
+    __testing.resetDedup();
+    // Feed header 30 s behind the clock, inside the collection window.
+    const feedTs = Date.parse("2026-07-08T07:00:00.000Z") / 1000;
+    vi.setSystemTime(new Date((feedTs + 30) * 1000));
+    const events = mockFeedAndNewRelic(buildFeedMessage({ timestamp: feedTs }));
+
+    await fire(nrEnv);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: "GtfsCollectorFire",
+      service: "gtfs-collector",
+      polls: 6,
+      written: 1,
+      deduped: 5,
+      fetchFailed: 0,
+      errors: 0,
+    });
+    expect(events[0].feedAgeSec).toBeGreaterThanOrEqual(30);
+    expect(events[0].bytes).toBeGreaterThan(0);
+  });
+
+  it("sends nothing during the off-hours window", async () => {
+    vi.setSystemTime(new Date("2026-07-08T00:30:00.000Z")); // 03:30 Kyiv
+    const events = mockFeedAndNewRelic(buildFeedMessage({ timestamp: 1_700_000_080 }));
+
+    await fire(nrEnv);
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("sends nothing without a licence key", async () => {
+    __testing.resetDedup();
+    const events = mockFeedAndNewRelic(buildFeedMessage({ timestamp: 1_700_000_090 }));
+
+    await fire(env);
+
+    expect(events).toHaveLength(0);
+    expect(await listAll()).toHaveLength(1);
+  });
+});
+
 describe("fetchFeed() failure classification", () => {
   async function fetchFeedWithTimers() {
     // fetchFeed backs off between attempts; drive those timers instead of

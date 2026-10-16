@@ -1,4 +1,6 @@
-const FEED_URL = "https://track.ua-gis.com/gtfs/lviv/vehicle_position";
+import { recordEvent } from "./newrelic.js";
+
+const FEED_URL ="https://track.ua-gis.com/gtfs/lviv/vehicle_position";
 const STATIC_FEED_URL = "https://track.ua-gis.com/gtfs/lviv/static.zip";
 const STATIC_CRON = "0 2 * * *";
 const STATIC_LATEST_KEY = "static/_latest.json";
@@ -32,7 +34,13 @@ export default {
   // instead — see collectStatic().
   async scheduled(event, env, ctx) {
     if (event.cron === STATIC_CRON) {
-      ctx.waitUntil(collectStatic(env));
+      ctx.waitUntil(
+        (async () => {
+          const start = Date.now();
+          const outcome = await collectStatic(env);
+          await recordEvent(env, "GtfsCollectorStatic", { ...outcome, durationMs: Date.now() - start });
+        })(),
+      );
       return;
     }
     ctx.waitUntil(
@@ -41,15 +49,32 @@ export default {
         // back-to-back identical snapshots and throttles Sentry noise to
         // at most one warning of each kind per fire.
         const state = { lastFeedTimestamp: lastWrittenFeedTimestamp, warnedUnavailable: false, warnedStale: false };
+        // One New Relic event per fire, not per poll: six polls a minute
+        // would be ~7k events a day for no extra signal.
+        const outcomes = {};
+        const fireStart = Date.now();
         for (let i = 0; i < POLLS_PER_CRON; i++) {
           const start = Date.now();
-          await collect(env, state);
+          const outcome = await collect(env, state);
+          outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
           lastWrittenFeedTimestamp = state.lastFeedTimestamp;
           if (i < POLLS_PER_CRON - 1) {
             const elapsed = Date.now() - start;
             await new Promise((r) => setTimeout(r, Math.max(0, POLL_INTERVAL_MS - elapsed)));
           }
         }
+        if (outcomes.off_hours === POLLS_PER_CRON) return;
+        await recordEvent(env, "GtfsCollectorFire", {
+          polls: POLLS_PER_CRON,
+          written: outcomes.written ?? 0,
+          deduped: outcomes.deduped ?? 0,
+          fetchFailed: outcomes.fetch_failed ?? 0,
+          errors: outcomes.error ?? 0,
+          feedFailure: state.feedFailure ?? null,
+          feedAgeSec: state.feedAgeSecs ?? null,
+          bytes: state.bytes ?? null,
+          durationMs: Date.now() - fireStart,
+        });
       })(),
     );
   },
@@ -388,13 +413,17 @@ async function listWithRetry(bucket, options) {
   }
 }
 
+// Returns the poll's outcome ("off_hours", "fetch_failed", "deduped",
+// "written" or "error") and leaves the latest feed age, size and failure
+// class on `state` for the per-fire New Relic event.
 async function collect(env, state) {
   try {
     const hour = kyivHour(new Date());
-    if (hour >= 0 && hour < 4) return;
+    if (hour >= 0 && hour < 4) return "off_hours";
 
     const { buf, failure } = await fetchFeed();
     if (!buf) {
+      state.feedFailure = failure;
       if (!state.warnedUnavailable) {
         state.warnedUnavailable = true;
         await captureToSentry(env, "GTFS feed unavailable after all retries", {
@@ -402,8 +431,9 @@ async function collect(env, state) {
           tags: { stage: "fetch_feed", feed_failure: failure },
         });
       }
-      return;
+      return "fetch_failed";
     }
+    state.bytes = buf.byteLength;
 
     let feedInfo = { headerTimestamp: null };
     try {
@@ -415,6 +445,7 @@ async function collect(env, state) {
 
     if (feedInfo.headerTimestamp !== null) {
       const ageSecs = Date.now() / 1000 - feedInfo.headerTimestamp;
+      state.feedAgeSecs = Math.round(ageSecs);
       if (ageSecs > STALE_FEED_THRESHOLD_SECS && !state.warnedStale) {
         state.warnedStale = true;
         await captureToSentry(env, `GTFS feed is stale (${Math.round(ageSecs)}s old)`, {
@@ -425,7 +456,7 @@ async function collect(env, state) {
 
       if (feedInfo.headerTimestamp === state.lastFeedTimestamp) {
         // identical to the last written snapshot; skip the write
-        return;
+        return "deduped";
       }
     }
 
@@ -452,8 +483,10 @@ async function collect(env, state) {
     // Only after a successful put: a failed write must not make the next
     // poll skip the same feed as a "duplicate".
     if (feedInfo.headerTimestamp !== null) state.lastFeedTimestamp = feedInfo.headerTimestamp;
+    return "written";
   } catch (err) {
     await captureToSentry(env, err, { tags: { stage: "collect" } });
+    return "error";
   }
 }
 
@@ -470,6 +503,8 @@ async function collect(env, state) {
 // *current* static, even for past days — if the schedule changes, historical
 // scoring silently uses the wrong era. Dated snapshots here let it pin each
 // day to the static that was actually in effect.
+//
+// Returns { outcome, ... } for the daily New Relic event.
 async function collectStatic(env) {
   try {
     const prevObj = await env.BUCKET.get(STATIC_LATEST_KEY);
@@ -482,7 +517,7 @@ async function collectStatic(env) {
       signal: AbortSignal.timeout(STATIC_FETCH_TIMEOUT_MS),
     });
     if (head.ok && prev && sameValidators(prev, validators(head))) {
-      return; // unchanged since the last archived copy
+      return { outcome: "unchanged" }; // unchanged since the last archived copy
     }
 
     const res = await fetch(STATIC_FEED_URL, { signal: AbortSignal.timeout(STATIC_FETCH_TIMEOUT_MS) });
@@ -491,7 +526,7 @@ async function collectStatic(env) {
         level: "warning",
         tags: { stage: "fetch_static" },
       });
-      return;
+      return { outcome: "fetch_failed", httpStatus: res.status };
     }
     const buf = await res.arrayBuffer();
     if (!isZip(buf)) {
@@ -499,7 +534,7 @@ async function collectStatic(env) {
         level: "warning",
         tags: { stage: "fetch_static" },
       });
-      return;
+      return { outcome: "invalid_body", bytes: buf.byteLength };
     }
 
     const sha256 = await sha256Hex(buf);
@@ -510,7 +545,7 @@ async function collectStatic(env) {
       await putWithRetry(env.BUCKET, STATIC_LATEST_KEY, JSON.stringify({ ...prev, etag, lastModified }), {
         httpMetadata: { contentType: "application/json" },
       });
-      return;
+      return { outcome: "unchanged_content", bytes: buf.byteLength };
     }
 
     const day = new Date().toISOString().slice(0, 10);
@@ -524,8 +559,10 @@ async function collectStatic(env) {
     await putWithRetry(env.BUCKET, STATIC_LATEST_KEY, JSON.stringify({ ...meta, sha256, key, date: day }), {
       httpMetadata: { contentType: "application/json" },
     });
+    return { outcome: "archived", bytes: buf.byteLength };
   } catch (err) {
     await captureToSentry(env, err, { tags: { stage: "collect_static" } });
+    return { outcome: "error" };
   }
 }
 

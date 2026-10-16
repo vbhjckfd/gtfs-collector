@@ -74,11 +74,11 @@ describe("collectStatic()", () => {
 
   it("skips the write when the feed is unchanged (same etag/last-modified)", async () => {
     mockStaticFeed();
-    await __testing.collectStatic(env);
+    expect(await __testing.collectStatic(env)).toMatchObject({ outcome: "archived" });
 
     vi.setSystemTime(new Date("2026-08-01T02:00:00.000Z"));
     mockStaticFeed();
-    await __testing.collectStatic(env);
+    expect(await __testing.collectStatic(env)).toEqual({ outcome: "unchanged" });
 
     const dated = await listAll("static/");
     // Only the original dated copy + the marker — nothing for 2026-08-01.
