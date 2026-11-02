@@ -1,0 +1,6 @@
+boto3
+gtfs-realtime-bindings
+mapbox-vector-tile>=2
+numpy
+pillow
+pmtiles

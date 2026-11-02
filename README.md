@@ -146,6 +146,7 @@ npm run dev     # wrangler dev
 ## Tools
 
 - [`tools/day-video`](tools/day-video/README.md): renders a timelapse video of one day of Lviv transport from the snapshots in R2.
+- [`tools/rush-video`](tools/rush-video/README.md): renders a near-real-time clip of a short window (the morning rush by default) with every vehicle moving along its route.
 
 ## Feed source
 
