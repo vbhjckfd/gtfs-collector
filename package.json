@@ -13,7 +13,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "overrides": {
     "undici": "^7.29.1",
     "sharp": "^0.35.5",
